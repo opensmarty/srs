@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -34,11 +34,8 @@
 #include <sstream>
 using namespace std;
 
-#ifdef SRS_AUTO_SSL
 #include <openssl/aes.h>
 #include <cstring>
-#endif
-
 #include <srs_kernel_log.hpp>
 #include <srs_kernel_error.hpp>
 #include <srs_kernel_codec.hpp>
@@ -48,14 +45,6 @@ using namespace std;
 #include <srs_core_autofree.hpp>
 
 #define HLS_AES_ENCRYPT_BLOCK_LENGTH SRS_TS_PACKET_SIZE * 4
-
-// in ms, for HLS aac sync time.
-#define SRS_CONF_DEFAULT_AAC_SYNC 100
-
-// @see: ngx_rtmp_hls_audio
-/* We assume here AAC frame size is 1024
- * Need to handle AAC frames with frame size of 960 */
-#define _SRS_AAC_SAMPLE_SIZE 1024
 
 // the mpegts header specifed the video/audio pid.
 #define TS_PMT_NUMBER 1
@@ -301,7 +290,7 @@ srs_error_t SrsTsContext::decode(SrsBuffer* stream, ISrsTsHandler* handler)
     return err;
 }
 
-srs_error_t SrsTsContext::encode(SrsFileWriter* writer, SrsTsMessage* msg, SrsVideoCodecId vc, SrsAudioCodecId ac)
+srs_error_t SrsTsContext::encode(ISrsStreamWriter* writer, SrsTsMessage* msg, SrsVideoCodecId vc, SrsAudioCodecId ac)
 {
     srs_error_t err = srs_success;
     
@@ -323,6 +312,8 @@ srs_error_t SrsTsContext::encode(SrsFileWriter* writer, SrsTsMessage* msg, SrsVi
         case SrsVideoCodecIdOn2VP6:
         case SrsVideoCodecIdOn2VP6WithAlphaChannel:
         case SrsVideoCodecIdScreenVideoVersion2:
+        case SrsVideoCodecIdHEVC:
+        case SrsVideoCodecIdAV1:
             vs = SrsTsStreamReserved;
             break;
     }
@@ -351,6 +342,7 @@ srs_error_t SrsTsContext::encode(SrsFileWriter* writer, SrsTsMessage* msg, SrsVi
         case SrsAudioCodecIdSpeex:
         case SrsAudioCodecIdReservedMP3_8kHz:
         case SrsAudioCodecIdReservedDeviceSpecificSound:
+        case SrsAudioCodecIdOpus:
             as = SrsTsStreamReserved;
             break;
     }
@@ -381,7 +373,7 @@ void SrsTsContext::set_sync_byte(int8_t sb)
     sync_byte = sb;
 }
 
-srs_error_t SrsTsContext::encode_pat_pmt(SrsFileWriter* writer, int16_t vpid, SrsTsStream vs, int16_t apid, SrsTsStream as)
+srs_error_t SrsTsContext::encode_pat_pmt(ISrsStreamWriter* writer, int16_t vpid, SrsTsStream vs, int16_t apid, SrsTsStream as)
 {
     srs_error_t err = srs_success;
     
@@ -442,7 +434,7 @@ srs_error_t SrsTsContext::encode_pat_pmt(SrsFileWriter* writer, int16_t vpid, Sr
     return err;
 }
 
-srs_error_t SrsTsContext::encode_pes(SrsFileWriter* writer, SrsTsMessage* msg, int16_t pid, SrsTsStream sid, bool pure_audio)
+srs_error_t SrsTsContext::encode_pes(ISrsStreamWriter* writer, SrsTsMessage* msg, int16_t pid, SrsTsStream sid, bool pure_audio)
 {
     srs_error_t err = srs_success;
     
@@ -629,7 +621,7 @@ srs_error_t SrsTsPacket::decode(SrsBuffer* stream, SrsTsMessage** ppmsg)
                 payload = new SrsTsPayloadPES(this);
             } else {
                 // left bytes as reserved.
-                stream->skip(nb_payload);
+                stream->skip(srs_min(stream->left(), nb_payload));
             }
         }
         
@@ -753,8 +745,9 @@ SrsTsPacket* SrsTsPacket::create_pat(SrsTsContext* context, int16_t pmt_number, 
     return pkt;
 }
 
-SrsTsPacket* SrsTsPacket::create_pmt(SrsTsContext* context, int16_t pmt_number, int16_t pmt_pid, int16_t vpid, SrsTsStream vs, int16_t apid, SrsTsStream as)
-{
+SrsTsPacket* SrsTsPacket::create_pmt(SrsTsContext* context,
+    int16_t pmt_number, int16_t pmt_pid, int16_t vpid, SrsTsStream vs, int16_t apid, SrsTsStream as
+) {
     SrsTsPacket* pkt = new SrsTsPacket(context);
     pkt->sync_byte = 0x47;
     pkt->transport_error_indicator = 0;
@@ -801,9 +794,9 @@ SrsTsPacket* SrsTsPacket::create_pmt(SrsTsContext* context, int16_t pmt_number, 
 }
 
 SrsTsPacket* SrsTsPacket::create_pes_first(SrsTsContext* context,
-                                           int16_t pid, SrsTsPESStreamId sid, uint8_t continuity_counter, bool discontinuity,
-                                           int64_t pcr, int64_t dts, int64_t pts, int size
-                                           ) {
+    int16_t pid, SrsTsPESStreamId sid, uint8_t continuity_counter, bool discontinuity,
+    int64_t pcr, int64_t dts, int64_t pts, int size
+) {
     SrsTsPacket* pkt = new SrsTsPacket(context);
     pkt->sync_byte = 0x47;
     pkt->transport_error_indicator = 0;
@@ -818,6 +811,8 @@ SrsTsPacket* SrsTsPacket::create_pes_first(SrsTsContext* context,
     pkt->payload = pes;
     
     if (pcr >= 0) {
+        // Ignore coverage for PCR, we don't use it in HLS.
+        // LCOV_EXCL_START
         SrsTsAdaptationField* af = new SrsTsAdaptationField(pkt);
         pkt->adaptation_field = af;
         pkt->adaption_field_control = SrsTsAdaptationFieldTypeBoth;
@@ -833,6 +828,7 @@ SrsTsPacket* SrsTsPacket::create_pes_first(SrsTsContext* context,
         af->adaptation_field_extension_flag = 0;
         af->program_clock_reference_base = pcr;
         af->program_clock_reference_extension = 0;
+        // LCOV_EXCL_STOP
     }
     
     pes->packet_start_code_prefix = 0x01;
@@ -980,7 +976,9 @@ srs_error_t SrsTsAdaptationField::decode(SrsBuffer* stream)
         const1_value0 = (pcrv >> 9) & 0x3F;
         program_clock_reference_base = (pcrv >> 15) & 0x1ffffffffLL;
     }
-    
+
+    // Ignore coverage for bellow, we don't use it in HLS.
+    // LCOV_EXCL_START
     if (OPCR_flag) {
         if (!stream->require(6)) {
             return srs_error_new(ERROR_STREAM_CASTER_TS_AF, "ts: demux af OPCR_flag");
@@ -1088,6 +1086,7 @@ srs_error_t SrsTsAdaptationField::decode(SrsBuffer* stream)
         nb_af_ext_reserved = adaptation_field_extension_length - (stream->pos() - pos_af_ext);
         stream->skip(nb_af_ext_reserved);
     }
+    // LCOV_EXCL_STOP
     
     nb_af_reserved = adaption_field_length - (stream->pos() - pos_af);
     stream->skip(nb_af_reserved);
@@ -1151,7 +1150,9 @@ srs_error_t SrsTsAdaptationField::encode(SrsBuffer* stream)
     tmpv |= (splicing_point_flag << 2) & 0x04;
     tmpv |= (transport_private_data_flag << 1) & 0x02;
     stream->write_1bytes(tmpv);
-    
+
+    // Ignore the coverage bellow, for we don't use them in HLS.
+    // LCOV_EXCL_START
     if (PCR_flag) {
         if (!stream->require(6)) {
             return srs_error_new(ERROR_STREAM_CASTER_TS_AF, "ts: mux af PCR_flag");
@@ -1244,6 +1245,7 @@ srs_error_t SrsTsAdaptationField::encode(SrsBuffer* stream)
             stream->skip(nb_af_ext_reserved);
         }
     }
+    // LCOV_EXCL_STOP
     
     if (nb_af_reserved) {
         stream->skip(nb_af_reserved);
@@ -1468,7 +1470,10 @@ srs_error_t SrsTsPayloadPES::decode(SrsBuffer* stream, SrsTsMessage** ppmsg)
                 msg->dts = dts;
                 msg->pts = pts;
             }
-            
+
+            // Ignore coverage bellow, for we don't use them in HLS.
+            // LCOV_EXCL_START
+
             // 6B
             if (ESCR_flag) {
                 ESCR_extension = 0;
@@ -1596,6 +1601,8 @@ srs_error_t SrsTsPayloadPES::decode(SrsBuffer* stream, SrsTsMessage** ppmsg)
                 }
                 stream->skip(nb_stuffings);
             }
+
+            // LCOV_EXCL_STOP
             
             // PES_packet_data_byte, page58.
             // the packet size contains the header size.
@@ -1618,6 +1625,9 @@ srs_error_t SrsTsPayloadPES::decode(SrsBuffer* stream, SrsTsMessage** ppmsg)
             if ((err = msg->dump(stream, &nb_bytes)) != srs_success) {
                 return srs_error_wrap(err, "dump pes");
             }
+
+            // Ignore coverage bellow, for we don't use them in HLS.
+            // LCOV_EXCL_START
         } else if (sid == SrsTsPESStreamIdProgramStreamMap
                    || sid == SrsTsPESStreamIdPrivateStream2
                    || sid == SrsTsPESStreamIdEcmStream
@@ -1641,6 +1651,8 @@ srs_error_t SrsTsPayloadPES::decode(SrsBuffer* stream, SrsTsMessage** ppmsg)
             nb_paddings = stream->size() - stream->pos();
             stream->skip(nb_paddings);
             srs_info("ts: drop %dB padding bytes", nb_paddings);
+
+            // LCOV_EXCL_STOP
         } else {
             int nb_drop = stream->size() - stream->pos();
             stream->skip(nb_drop);
@@ -1693,13 +1705,16 @@ int SrsTsPayloadPES::size()
         sz += additional_copy_info_flag? 1:0;
         sz += PES_CRC_flag? 2:0;
         sz += PES_extension_flag? 1:0;
-        
+
         if (PES_extension_flag) {
+            // Ignore coverage bellow, for we don't use them in HLS.
+            // LCOV_EXCL_START
             sz += PES_private_data_flag? 16:0;
             sz += pack_header_field_flag ? 1 + pack_field.size() : 0; // 1+x bytes.
             sz += program_packet_sequence_counter_flag? 2:0;
             sz += P_STD_buffer_flag? 2:0;
             sz += PES_extension_flag_2 ? 1 + PES_extension_field.size() : 0; // 1+x bytes.
+            // LCOV_EXCL_STOP
         }
         PES_header_data_length = sz - PES_header_data_length;
         
@@ -1810,6 +1825,9 @@ srs_error_t SrsTsPayloadPES::encode(SrsBuffer* stream)
             srs_warn("ts: sync dts=%" PRId64 ", pts=%" PRId64, dts, pts);
         }
     }
+
+    // Ignore coverage bellow, for we don't use them in HLS.
+    // LCOV_EXCL_START
     
     // 6B
     if (ESCR_flag) {
@@ -1869,6 +1887,8 @@ srs_error_t SrsTsPayloadPES::encode(SrsBuffer* stream)
         stream->skip(nb_stuffings);
         srs_warn("ts: demux PES, ignore the stuffings.");
     }
+
+    // LCOV_EXCL_STOP
     
     return err;
 }
@@ -2544,7 +2564,7 @@ srs_error_t SrsTsPayloadPMT::psi_encode(SrsBuffer* stream)
     return err;
 }
 
-SrsTsContextWriter::SrsTsContextWriter(SrsFileWriter* w, SrsTsContext* c, SrsAudioCodecId ac, SrsVideoCodecId vc)
+SrsTsContextWriter::SrsTsContextWriter(ISrsStreamWriter* w, SrsTsContext* c, SrsAudioCodecId ac, SrsVideoCodecId vc)
 {
     writer = w;
     context = c;
@@ -2555,25 +2575,6 @@ SrsTsContextWriter::SrsTsContextWriter(SrsFileWriter* w, SrsTsContext* c, SrsAud
 
 SrsTsContextWriter::~SrsTsContextWriter()
 {
-    close();
-}
-
-srs_error_t SrsTsContextWriter::open(string p)
-{
-    srs_error_t err = srs_success;
-    
-    path = p;
-    
-    close();
-    
-    // reset the context for a new ts start.
-    context->reset();
-    
-    if ((err = writer->open(path)) != srs_success) {
-        return srs_error_wrap(err, "ts: open writer");
-    }
-    
-    return err;
 }
 
 srs_error_t SrsTsContextWriter::write_audio(SrsTsMessage* audio)
@@ -2606,17 +2607,11 @@ srs_error_t SrsTsContextWriter::write_video(SrsTsMessage* video)
     return err;
 }
 
-void SrsTsContextWriter::close()
-{
-    writer->close();
-}
-
 SrsVideoCodecId SrsTsContextWriter::video_codec()
 {
     return vcodec;
 }
 
-#ifdef SRS_AUTO_SSL
 SrsEncFileWriter::SrsEncFileWriter()
 {
     memset(iv,0,16);
@@ -2703,7 +2698,6 @@ void SrsEncFileWriter::close()
     
     SrsFileWriter::close();
 }
-#endif
 
 SrsTsMessageCache::SrsTsMessageCache()
 {
@@ -3014,7 +3008,7 @@ SrsTsTransmuxer::~SrsTsTransmuxer()
     srs_freep(context);
 }
 
-srs_error_t SrsTsTransmuxer::initialize(SrsFileWriter* fw)
+srs_error_t SrsTsTransmuxer::initialize(ISrsStreamWriter* fw)
 {
     srs_error_t err = srs_success;
     
@@ -3024,19 +3018,11 @@ srs_error_t SrsTsTransmuxer::initialize(SrsFileWriter* fw)
     
     srs_assert(fw);
     
-    if (!fw->is_open()) {
-        return srs_error_new(ERROR_KERNEL_FLV_STREAM_CLOSED, "ts: stream is not open");
-    }
-    
     writer = fw;
     
     srs_freep(tscw);
     // TODO: FIXME: Support config the codec.
     tscw = new SrsTsContextWriter(fw, context, SrsAudioCodecIdAAC, SrsVideoCodecIdAVC);
-    
-    if ((err = tscw->open("")) != srs_success) {
-        return srs_error_wrap(err, "ts: open writer");
-    }
     
     return err;
 }

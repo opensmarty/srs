@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -129,7 +129,7 @@ struct Context
         h264_sps_pps_sent = false;
         h264_sps_changed = false;
         h264_pps_changed = false;
-        rtimeout = stimeout = SRS_CONSTS_NO_TMMS;
+        rtimeout = stimeout = SRS_UTIME_NO_TIMEOUT;
         schema = srs_url_schema_normal;
     }
     virtual ~Context() {
@@ -572,8 +572,8 @@ int srs_rtmp_set_timeout(srs_rtmp_t rtmp, int recv_timeout_ms, int send_timeout_
     context->stimeout = send_timeout_ms;
     context->rtimeout = recv_timeout_ms;
     
-    context->skt->set_recv_timeout(context->rtimeout);
-    context->skt->set_send_timeout(context->stimeout);
+    context->skt->set_recv_timeout(context->rtimeout * SRS_UTIME_MILLISECONDS);
+    context->skt->set_send_timeout(context->stimeout * SRS_UTIME_MILLISECONDS);
     
     return ret;
 }
@@ -635,13 +635,13 @@ int srs_rtmp_connect_server(srs_rtmp_t rtmp)
     Context* context = (Context*)rtmp;
     
     // set timeout if user not set.
-    if (context->stimeout == SRS_CONSTS_NO_TMMS) {
+    if (context->stimeout == SRS_UTIME_NO_TIMEOUT) {
         context->stimeout = SRS_SOCKET_DEFAULT_TMMS;
-        context->skt->set_send_timeout(context->stimeout);
+        context->skt->set_send_timeout(context->stimeout * SRS_UTIME_MILLISECONDS);
     }
-    if (context->rtimeout == SRS_CONSTS_NO_TMMS) {
+    if (context->rtimeout == SRS_UTIME_NO_TIMEOUT) {
         context->rtimeout = SRS_SOCKET_DEFAULT_TMMS;
-        context->skt->set_recv_timeout(context->rtimeout);
+        context->skt->set_recv_timeout(context->rtimeout * SRS_UTIME_MILLISECONDS);
     }
     
     if ((ret = srs_librtmp_context_connect(context)) != ERROR_SUCCESS) {
@@ -653,10 +653,6 @@ int srs_rtmp_connect_server(srs_rtmp_t rtmp)
 
 int srs_rtmp_do_complex_handshake(srs_rtmp_t rtmp)
 {
-#ifndef SRS_AUTO_SSL
-    // complex handshake requires ssl
-    return ERROR_RTMP_HS_SSL_REQUIRE;
-#else
     int ret = ERROR_SUCCESS;
     srs_error_t err = srs_success;
     
@@ -676,7 +672,6 @@ int srs_rtmp_do_complex_handshake(srs_rtmp_t rtmp)
     }
     
     return ret;
-#endif
 }
 
 int srs_rtmp_do_simple_handshake(srs_rtmp_t rtmp)
@@ -1671,7 +1666,7 @@ int srs_mp4_to_flv_tag(srs_mp4_t mp4, srs_mp4_sample_t* s, char* type, uint32_t*
     
     // E.4.3.1 VIDEODATA, flv_v10_1.pdf, page 5
     p.write_1bytes(uint8_t(s->frame_type<<4) | uint8_t(s->codec));
-    if (s->codec == SrsVideoCodecIdAVC) {
+    if (s->codec == SrsVideoCodecIdAVC || s->codec == SrsVideoCodecIdHEVC || s->codec == SrsVideoCodecIdAV1) {
         *type = SRS_RTMP_TYPE_VIDEO;
         
         p.write_1bytes(uint8_t(s->frame_trait == (uint16_t)SrsVideoAvcFrameTraitSequenceHeader? 0:1));
@@ -2217,7 +2212,7 @@ void srs_amf0_strict_array_append(srs_amf0_t amf0, srs_amf0_t value)
 
 int64_t srs_utils_time_ms()
 {
-    return srs_update_system_time_ms();
+    return srs_update_system_time();
 }
 
 int64_t srs_utils_send_bytes(srs_rtmp_t rtmp)
@@ -2359,7 +2354,7 @@ char srs_utils_flv_audio_sound_format(char* data, int size)
     
     uint8_t sound_format = data[0];
     sound_format = (sound_format >> 4) & 0x0f;
-    if (sound_format > 15 || sound_format == 12 || sound_format == 13) {
+    if (sound_format > 15 || sound_format == 12) {
         return -1;
     }
     
@@ -2368,12 +2363,24 @@ char srs_utils_flv_audio_sound_format(char* data, int size)
 
 char srs_utils_flv_audio_sound_rate(char* data, int size)
 {
-    if (size < 1) {
+    if (size < 3) {
         return -1;
     }
     
     uint8_t sound_rate = data[0];
     sound_rate = (sound_rate >> 2) & 0x03;
+    
+    // For Opus, the first UINT8 is sampling rate.
+    uint8_t sound_format = (data[0] >> 4) & 0x0f;
+    if (sound_format != SrsAudioCodecIdOpus) {
+        return sound_rate;
+    }
+    
+    // The FrameTrait for AAC or Opus.
+    uint8_t frame_trait = data[1];
+    if ((frame_trait&SrsAudioOpusFrameTraitSamplingRate) == SrsAudioOpusFrameTraitSamplingRate) {
+        sound_rate = data[2];
+    }
     
     return sound_rate;
 }
@@ -2408,16 +2415,13 @@ char srs_utils_flv_audio_aac_packet_type(char* data, int size)
         return -1;
     }
     
-    if (srs_utils_flv_audio_sound_format(data, size) != 10) {
+    uint8_t sound_format = srs_utils_flv_audio_sound_format(data, size);
+    if (sound_format != SrsAudioCodecIdAAC && sound_format != SrsAudioCodecIdOpus) {
         return -1;
     }
     
-    uint8_t aac_packet_type = data[1];
-    if (aac_packet_type > 1) {
-        return -1;
-    }
-    
-    return aac_packet_type;
+    uint8_t frame_trait = data[1];
+    return frame_trait;
 }
 
 char* srs_human_amf0_print(srs_amf0_t amf0, char** pdata, int* psize)
@@ -2524,6 +2528,7 @@ const char* srs_human_flv_audio_sound_format2string(char sound_format)
     static const char* aac = "AAC";
     static const char* speex = "Speex";
     static const char* mp3_8khz = "MP3KHz8";
+    static const char* opus = "Opus";
     static const char* device_specific = "DeviceSpecific";
     static const char* unknown = "Unknown";
     
@@ -2540,6 +2545,7 @@ const char* srs_human_flv_audio_sound_format2string(char sound_format)
         case 9: return reserved;
         case 10: return aac;
         case 11: return speex;
+        case 13: return opus;
         case 14: return mp3_8khz;
         case 15: return device_specific;
         default: return unknown;
@@ -2556,11 +2562,26 @@ const char* srs_human_flv_audio_sound_rate2string(char sound_rate)
     static const char* khz_44 = "44KHz";
     static const char* unknown = "Unknown";
     
+    // For Opus, support 8, 12, 16, 24, 48KHz
+    // We will write a UINT8 sampling rate after FLV audio tag header.
+    // @doc https://tools.ietf.org/html/rfc6716#section-2
+    static const char* NB8kHz   = "NB8kHz";
+    static const char* MB12kHz  = "MB12kHz";
+    static const char* WB16kHz  = "WB16kHz";
+    static const char* SWB24kHz = "SWB24kHz";
+    static const char* FB48kHz  = "FB48kHz";
+    
     switch (sound_rate) {
         case 0: return khz_5_5;
         case 1: return khz_11;
         case 2: return khz_22;
         case 3: return khz_44;
+        // For Opus, support 8, 12, 16, 24, 48KHz
+        case 8: return NB8kHz;
+        case 12: return MB12kHz;
+        case 16: return WB16kHz;
+        case 24: return SWB24kHz;
+        case 48: return FB48kHz;
         default: return unknown;
     }
     
@@ -2606,6 +2627,16 @@ const char* srs_human_flv_audio_aac_packet_type2string(char aac_packet_type)
     switch (aac_packet_type) {
         case 0: return sps_pps;
         case 1: return raw;
+            
+        // See enum SrsAudioAacFrameTrait
+        // For Opus, the frame trait, may has more than one traits.
+        case 2: return "RAW";
+        case 4: return "SR";
+        case 8: return "AL";
+        case 6: return "RAW|SR";
+        case 10: return "RAW|AL";
+        case 14: return "RAW|SR|AL";
+            
         default: return unknown;
     }
     

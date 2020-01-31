@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -49,7 +49,8 @@ SrsStatisticVhost::SrsStatisticVhost()
 {
     id = srs_generate_id();
     
-    kbps = new SrsKbps();
+    clk = new SrsWallClock();
+    kbps = new SrsKbps(clk);
     kbps->set_io(NULL, NULL);
     
     nb_clients = 0;
@@ -59,6 +60,7 @@ SrsStatisticVhost::SrsStatisticVhost()
 SrsStatisticVhost::~SrsStatisticVhost()
 {
     srs_freep(kbps);
+    srs_freep(clk);
 }
 
 srs_error_t SrsStatisticVhost::dumps(SrsJsonObject* obj)
@@ -88,7 +90,7 @@ srs_error_t SrsStatisticVhost::dumps(SrsJsonObject* obj)
     
     hls->set("enabled", SrsJsonAny::boolean(hls_enabled));
     if (hls_enabled) {
-        hls->set("fragment", SrsJsonAny::number(_srs_config->get_hls_fragment(vhost)));
+        hls->set("fragment", SrsJsonAny::number(srsu2msi(_srs_config->get_hls_fragment(vhost))/1000.0));
     }
     
     return err;
@@ -114,7 +116,8 @@ SrsStatisticStream::SrsStatisticStream()
     width = 0;
     height = 0;
     
-    kbps = new SrsKbps();
+    clk = new SrsWallClock();
+    kbps = new SrsKbps(clk);
     kbps->set_io(NULL, NULL);
     
     nb_clients = 0;
@@ -124,6 +127,7 @@ SrsStatisticStream::SrsStatisticStream()
 SrsStatisticStream::~SrsStatisticStream()
 {
     srs_freep(kbps);
+    srs_freep(clk);
 }
 
 srs_error_t SrsStatisticStream::dumps(SrsJsonObject* obj)
@@ -134,7 +138,7 @@ srs_error_t SrsStatisticStream::dumps(SrsJsonObject* obj)
     obj->set("name", SrsJsonAny::str(stream.c_str()));
     obj->set("vhost", SrsJsonAny::integer(vhost->id));
     obj->set("app", SrsJsonAny::str(app.c_str()));
-    obj->set("live_ms", SrsJsonAny::integer(srs_get_system_time_ms()));
+    obj->set("live_ms", SrsJsonAny::integer(srsu2ms(srs_get_system_time())));
     obj->set("clients", SrsJsonAny::integer(nb_clients));
     obj->set("frames", SrsJsonAny::integer(nb_frames));
     obj->set("send_bytes", SrsJsonAny::integer(kbps->get_send_bytes()));
@@ -204,7 +208,7 @@ SrsStatisticClient::SrsStatisticClient()
     conn = NULL;
     req = NULL;
     type = SrsRtmpConnUnknown;
-    create = srs_get_system_time_ms();
+    create = srs_get_system_time();
 }
 
 SrsStatisticClient::~SrsStatisticClient()
@@ -225,7 +229,7 @@ srs_error_t SrsStatisticClient::dumps(SrsJsonObject* obj)
     obj->set("url", SrsJsonAny::str(req->get_stream_url().c_str()));
     obj->set("type", SrsJsonAny::str(srs_client_type_string(type).c_str()));
     obj->set("publish", SrsJsonAny::boolean(srs_client_type_is_publish(type)));
-    obj->set("alive", SrsJsonAny::number((srs_get_system_time_ms() - create) / 1000.0));
+    obj->set("alive", SrsJsonAny::number(srsu2ms(srs_get_system_time() - create) / 1000.0));
     
     return err;
 }
@@ -236,13 +240,15 @@ SrsStatistic::SrsStatistic()
 {
     _server_id = srs_generate_id();
     
-    kbps = new SrsKbps();
+    clk = new SrsWallClock();
+    kbps = new SrsKbps(clk);
     kbps->set_io(NULL, NULL);
 }
 
 SrsStatistic::~SrsStatistic()
 {
     srs_freep(kbps);
+    srs_freep(clk);
     
     if (true) {
         std::map<int64_t, SrsStatisticVhost*>::iterator it;
@@ -453,16 +459,14 @@ void SrsStatistic::kbps_add_delta(SrsConnection* conn)
     SrsStatisticClient* client = clients[id];
     
     // resample the kbps to collect the delta.
-    conn->resample();
+    int64_t in, out;
+    conn->remark(&in, &out);
     
     // add delta of connection to kbps.
     // for next sample() of server kbps can get the stat.
-    kbps->add_delta(conn);
-    client->stream->kbps->add_delta(conn);
-    client->stream->vhost->kbps->add_delta(conn);
-    
-    // cleanup the delta.
-    conn->cleanup();
+    kbps->add_delta(in, out);
+    client->stream->kbps->add_delta(in, out);
+    client->stream->vhost->kbps->add_delta(in, out);
 }
 
 SrsKbps* SrsStatistic::kbps_sample()

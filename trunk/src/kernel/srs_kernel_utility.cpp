@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -37,6 +37,7 @@
 #include <stdlib.h>
 
 #include <vector>
+#include <algorithm>
 using namespace std;
 
 #include <srs_core_autofree.hpp>
@@ -76,7 +77,11 @@ srs_error_t srs_avc_nalu_read_uev(SrsBitBuffer* stream, int32_t& v)
     }
     
     v = (1 << leadingZeroBits) - 1;
-    for (int i = 0; i < leadingZeroBits; i++) {
+    for (int i = 0; i < (int)leadingZeroBits; i++) {
+        if (stream->empty()) {
+            return srs_error_new(ERROR_AVC_NALU_UEV, "no bytes for leadingZeroBits=%d", leadingZeroBits);
+        }
+        
         int32_t b = stream->read_bit();
         v += b << (leadingZeroBits - 1 - i);
     }
@@ -97,32 +102,35 @@ srs_error_t srs_avc_nalu_read_bit(SrsBitBuffer* stream, int8_t& v)
     return err;
 }
 
-static int64_t _srs_system_time_us_cache = 0;
-static int64_t _srs_system_time_startup_time = 0;
+srs_utime_t _srs_system_time_us_cache = 0;
+srs_utime_t _srs_system_time_startup_time = 0;
 
-int64_t srs_get_system_time_ms()
+srs_utime_t srs_get_system_time()
 {
     if (_srs_system_time_us_cache <= 0) {
-        srs_update_system_time_ms();
+        srs_update_system_time();
     }
     
-    return _srs_system_time_us_cache / 1000;
+    return _srs_system_time_us_cache;
 }
 
-int64_t srs_get_system_startup_time_ms()
+srs_utime_t srs_get_system_startup_time()
 {
     if (_srs_system_time_startup_time <= 0) {
-        srs_update_system_time_ms();
+        srs_update_system_time();
     }
     
-    return _srs_system_time_startup_time / 1000;
+    return _srs_system_time_startup_time;
 }
 
-int64_t srs_update_system_time_ms()
+// For utest to mock it.
+_srs_gettimeofday_t _srs_gettimeofday = ::gettimeofday;
+
+srs_utime_t srs_update_system_time()
 {
     timeval now;
     
-    if (gettimeofday(&now, NULL) < 0) {
+    if (_srs_gettimeofday(&now, NULL) < 0) {
         srs_warn("gettimeofday failed, ignore");
         return -1;
     }
@@ -139,7 +147,7 @@ int64_t srs_update_system_time_ms()
     // so we use relative time.
     if (_srs_system_time_us_cache <= 0) {
         _srs_system_time_startup_time = _srs_system_time_us_cache = now_us;
-        return _srs_system_time_us_cache / 1000;
+        return _srs_system_time_us_cache;
     }
     
     // use relative time.
@@ -154,67 +162,95 @@ int64_t srs_update_system_time_ms()
     _srs_system_time_us_cache = now_us;
     srs_info("clock updated, startup=%" PRId64 "us, now=%" PRId64 "us", _srs_system_time_startup_time, _srs_system_time_us_cache);
     
-    return _srs_system_time_us_cache / 1000;
+    return _srs_system_time_us_cache;
 }
 
+// TODO: FIXME: Replace by ST dns resolve.
 string srs_dns_resolve(string host, int& family)
 {
     addrinfo hints;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family  = family;
+    hints.ai_family = family;
     
     addrinfo* r = NULL;
     SrsAutoFree(addrinfo, r);
-    
-    if(getaddrinfo(host.c_str(), NULL, NULL, &r)) {
+    if(getaddrinfo(host.c_str(), NULL, &hints, &r)) {
         return "";
     }
     
-    char saddr[64];
-    char* h = (char*)saddr;
-    socklen_t nbh = sizeof(saddr);
-    const int r0 = getnameinfo(r->ai_addr, r->ai_addrlen, h, nbh, NULL, 0, NI_NUMERICHOST);
-
-    if(!r0) {
-       family = r->ai_family;
-       return string(saddr);
+    char shost[64];
+    memset(shost, 0, sizeof(shost));
+    if (getnameinfo(r->ai_addr, r->ai_addrlen, shost, sizeof(shost), NULL, 0, NI_NUMERICHOST)) {
+        return "";
     }
-    return "";
+
+   family = r->ai_family;
+   return string(shost);
 }
 
-void srs_parse_hostport(const string& hostport, string& host, int& port)
+void srs_parse_hostport(string hostport, string& host, int& port)
 {
-    const size_t pos = hostport.rfind(":");   // Look for ":" from the end, to work with IPv6.
-    if (pos != std::string::npos) {
-        const string p = hostport.substr(pos + 1);
-        if ((pos >= 1) &&
-            (hostport[0]       == '[') &&
-            (hostport[pos - 1] == ']')) {
-            // Handle IPv6 in RFC 2732 format, e.g. [3ffe:dead:beef::1]:1935
-            host = hostport.substr(1, pos - 2);
-        } else {
-            // Handle IP address
-            host = hostport.substr(0, pos);
-        }
-        port = ::atoi(p.c_str());
-    } else {
+    // No host or port.
+    if (hostport.empty()) {
+        return;
+    }
+
+    size_t pos = string::npos;
+
+    // Host only for ipv4.
+    if ((pos = hostport.rfind(":")) == string::npos) {
         host = hostport;
+        return;
+    }
+
+    // For ipv4(only one colon), host:port.
+    if (hostport.find(":") == pos) {
+        host = hostport.substr(0, pos);
+        string p = hostport.substr(pos + 1);
+        if (!p.empty()) {
+            port = ::atoi(p.c_str());
+        }
+        return;
+    }
+
+    // Host only for ipv6.
+    if (hostport.at(0) != '[' || (pos = hostport.rfind("]:")) == string::npos) {
+        host = hostport;
+        return;
+    }
+
+    // For ipv6, [host]:port.
+    host = hostport.substr(1, pos - 1);
+    string p = hostport.substr(pos + 2);
+    if (!p.empty()) {
+        port = ::atoi(p.c_str());
     }
 }
 
-string srs_any_address4listener()
+string srs_any_address_for_listener()
 {
-    int fd = socket(AF_INET6, SOCK_DGRAM, 0);
-    
-    // socket()
-    // A -1 is returned if an error occurs, otherwise the return value is a
-    // descriptor referencing the socket.
-    if(fd != -1) {
-        close(fd);
-        return "::";
+    bool ipv4_active = false;
+    bool ipv6_active = false;
+
+    if (true) {
+        int fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if(fd != -1) {
+            ipv4_active = true;
+            close(fd);
+        }
     }
-    
-    return "0.0.0.0";
+    if (true) {
+        int fd = socket(AF_INET6, SOCK_DGRAM, 0);
+        if(fd != -1) {
+            ipv6_active = true;
+            close(fd);
+        }
+    }
+
+    if (ipv6_active && !ipv4_active) {
+        return SRS_CONSTS_LOOPBACK6;
+    }
+    return SRS_CONSTS_LOOPBACK;
 }
 
 void srs_parse_endpoint(string hostport, string& ip, int& port)
@@ -232,7 +268,7 @@ void srs_parse_endpoint(string hostport, string& ip, int& port)
         const string sport = hostport.substr(pos + 1);
         port = ::atoi(sport.c_str());
     } else {
-        ip   = srs_any_address4listener();
+        ip = srs_any_address_for_listener();
         port = ::atoi(hostport.c_str());
     }
 }
@@ -303,7 +339,7 @@ string srs_string_trim_end(string str, string trim_chars)
             ret.erase(ret.end() - 1);
             
             // ok, matched, should reset the search
-            i = 0;
+            i = -1;
         }
     }
     
@@ -321,7 +357,7 @@ string srs_string_trim_start(string str, string trim_chars)
             ret.erase(ret.begin());
             
             // ok, matched, should reset the search
-            i = 0;
+            i = -1;
         }
     }
     
@@ -340,7 +376,7 @@ string srs_string_remove(string str, string remove_chars)
                 it = ret.erase(it);
                 
                 // ok, matched, should reset the search
-                i = 0;
+                i = -1;
             } else {
                 ++it;
             }
@@ -348,6 +384,32 @@ string srs_string_remove(string str, string remove_chars)
     }
     
     return ret;
+}
+
+string srs_erase_first_substr(string str, string erase_string)
+{
+	std::string ret = str;
+
+	size_t pos = ret.find(erase_string);
+
+	if (pos != std::string::npos) {
+		ret.erase(pos, erase_string.length());
+	}
+    
+	return ret;
+}
+
+string srs_erase_last_substr(string str, string erase_string)
+{
+	std::string ret = str;
+
+	size_t pos = ret.rfind(erase_string);
+
+	if (pos != std::string::npos) {
+		ret.erase(pos, erase_string.length());
+	}
+    
+	return ret;
 }
 
 bool srs_string_ends_with(string str, string flag)
@@ -406,9 +468,24 @@ bool srs_string_contains(string str, string flag0, string flag1, string flag2)
     return str.find(flag0) != string::npos || str.find(flag1) != string::npos || str.find(flag2) != string::npos;
 }
 
+int srs_string_count(string str, string flag)
+{
+    int nn = 0;
+    for (int i = 0; i < (int)flag.length(); i++) {
+        char ch = flag.at(i);
+        nn += std::count(str.begin(), str.end(), ch);
+    }
+    return nn;
+}
+
 vector<string> srs_string_split(string str, string flag)
 {
     vector<string> arr;
+    
+    if (flag.empty()) {
+        arr.push_back(str);
+        return arr;
+    }
     
     size_t pos;
     string s = str;
@@ -430,6 +507,10 @@ vector<string> srs_string_split(string str, string flag)
 string srs_string_min_match(string str, vector<string> flags)
 {
     string match;
+    
+    if (flags.empty()) {
+        return str;
+    }
     
     size_t min_pos = string::npos;
     for (vector<string>::iterator it = flags.begin(); it != flags.end(); ++it) {
@@ -503,11 +584,11 @@ int srs_do_create_dir_recursively(string dir)
     
     // create curren dir.
     // for srs-librtmp, @see https://github.com/ossrs/srs/issues/213
-#ifndef _WIN32
+#ifdef _WIN32
+    if (::_mkdir(dir.c_str()) < 0) {
+#else
     mode_t mode = S_IRUSR|S_IWUSR|S_IXUSR|S_IRGRP|S_IWGRP|S_IXGRP|S_IROTH|S_IXOTH;
     if (::mkdir(dir.c_str(), mode) < 0) {
-#else
-    if (::mkdir(dir.c_str()) < 0) {
 #endif
         if (errno == EEXIST) {
             return ERROR_SYSTEM_DIR_EXISTS;
@@ -624,6 +705,10 @@ string srs_path_filext(string path)
 
 bool srs_avc_startswith_annexb(SrsBuffer* stream, int* pnb_start_code)
 {
+    if (!stream) {
+        return false;
+    }
+    
     char* bytes = stream->data() + stream->pos();
     char* p = bytes;
     
@@ -653,6 +738,10 @@ bool srs_avc_startswith_annexb(SrsBuffer* stream, int* pnb_start_code)
 
 bool srs_aac_startswith_adts(SrsBuffer* stream)
 {
+    if (!stream) {
+        return false;
+    }
+    
     char* bytes = stream->data() + stream->pos();
     char* p = bytes;
     
@@ -674,7 +763,7 @@ uint64_t __crc32_reflect(uint64_t data, int width)
 {
     uint64_t res = data & 0x01;
     
-    for (int i = 0; i < width - 1; i++) {
+    for (int i = 0; i < (int)width - 1; i++) {
         data >>= 1;
         res = (res << 1) | (data & 0x01);
     }
@@ -692,7 +781,7 @@ void __crc32_make_table(uint32_t t[256], uint32_t poly, bool reflect_in)
     int tbl_idx_width = 8; // table index size.
     int tbl_width = 0x01 << tbl_idx_width; // table size: 256
     
-    for (int i = 0; i < tbl_width; i++) {
+    for (int i = 0; i < (int)tbl_width; i++) {
         uint64_t reg = uint64_t(i);
         
         if (reflect_in) {
@@ -731,14 +820,14 @@ uint32_t __crc32_table_driven(uint32_t* t, const void* buf, int size, uint32_t p
     if (!reflect_in) {
         reg = xor_in;
         
-        for (int i = 0; i < size; i++) {
+        for (int i = 0; i < (int)size; i++) {
             uint8_t tblidx = (uint8_t)((reg >> (width - tbl_idx_width)) ^ p[i]);
             reg = t[tblidx] ^ (reg << tbl_idx_width);
         }
     } else {
         reg = previous ^ __crc32_reflect(xor_in, width);
         
-        for (int i = 0; i < size; i++) {
+        for (int i = 0; i < (int)size; i++) {
             uint8_t tblidx = (uint8_t)(reg ^ p[i]);
             reg = t[tblidx] ^ (reg >> tbl_idx_width);
         }
@@ -844,7 +933,7 @@ srs_error_t srs_av_base64_decode(string cipher, string& plaintext)
     uint8_t decodeMap[256];
     memset(decodeMap, 0xff, sizeof(decodeMap));
     
-    for (int i = 0; i < encoder.length(); i++) {
+    for (int i = 0; i < (int)encoder.length(); i++) {
         decodeMap[(uint8_t)encoder.at(i)] = uint8_t(i);
     }
     
@@ -854,19 +943,20 @@ srs_error_t srs_av_base64_decode(string cipher, string& plaintext)
     int si = 0;
     
     // skip over newlines
-    for (; si < cipher.length() && (cipher.at(si) == '\n' || cipher.at(si) == '\r'); si++) {
+    for (; si < (int)cipher.length() && (cipher.at(si) == '\n' || cipher.at(si) == '\r'); si++) {
     }
     
-    for (bool end = false; si < cipher.length() && !end;) {
+    for (bool end = false; si < (int)cipher.length() && !end;) {
         // Decode quantum using the base64 alphabet
         uint8_t dbuf[4];
         memset(dbuf, 0x00, sizeof(dbuf));
         
         int dinc = 3;
         int dlen = 4;
+        srs_assert(dinc > 0);
         
-        for (int j = 0; j < sizeof(dbuf); j++) {
-            if (si == cipher.length()) {
+        for (int j = 0; j < (int)sizeof(dbuf); j++) {
+            if (si == (int)cipher.length()) {
                 if (padding != -1 || j < 2) {
                     return srs_error_new(ERROR_BASE64_DECODE, "corrupt input at %d", si);
                 }
@@ -881,7 +971,7 @@ srs_error_t srs_av_base64_decode(string cipher, string& plaintext)
             
             si++;
             // skip over newlines
-            for (; si < cipher.length() && (cipher.at(si) == '\n' || cipher.at(si) == '\r'); si++) {
+            for (; si < (int)cipher.length() && (cipher.at(si) == '\n' || cipher.at(si) == '\r'); si++) {
             }
             
             if (in == padding) {
@@ -893,7 +983,7 @@ srs_error_t srs_av_base64_decode(string cipher, string& plaintext)
                         return srs_error_new(ERROR_BASE64_DECODE, "corrupt input at %d", si);
                     case 2:
                         // "==" is expected, the first "=" is already consumed.
-                        if (si == cipher.length()) {
+                        if (si == (int)cipher.length()) {
                             return srs_error_new(ERROR_BASE64_DECODE, "corrupt input at %d", si);
                         }
                         if (cipher.at(si) != padding) {
@@ -903,11 +993,11 @@ srs_error_t srs_av_base64_decode(string cipher, string& plaintext)
                         
                         si++;
                         // skip over newlines
-                        for (; si < cipher.length() && (cipher.at(si) == '\n' || cipher.at(si) == '\r'); si++) {
+                        for (; si < (int)cipher.length() && (cipher.at(si) == '\n' || cipher.at(si) == '\r'); si++) {
                         }
                 }
                 
-                if (si < cipher.length()) {
+                if (si < (int)cipher.length()) {
                     // trailing garbage
                     err = srs_error_new(ERROR_BASE64_DECODE, "corrupt input at %d", si);
                 }
@@ -965,7 +1055,7 @@ uint8_t srs_from_hex_char(uint8_t c)
     return -1;
 }
 
-char *srs_data_to_hex(char *des,const u_int8_t *src,int len)
+char* srs_data_to_hex(char* des, const u_int8_t* src, int len)
 {
     if(src == NULL || len == 0 || des == NULL){
         return NULL;
@@ -987,7 +1077,7 @@ int srs_hex_to_data(uint8_t* data, const char* p, int size)
         return -1;
     }
     
-    for (int i = 0; i < size / 2; i++) {
+    for (int i = 0; i < (int)size / 2; i++) {
         uint8_t a = srs_from_hex_char(p[i*2]);
         if (a == (uint8_t)-1) {
             return -1;
@@ -1028,9 +1118,9 @@ int srs_chunk_header_c0(int perfer_cid, uint32_t timestamp, int32_t payload_leng
         *p++ = pp[1];
         *p++ = pp[0];
     } else {
-        *p++ = 0xFF;
-        *p++ = 0xFF;
-        *p++ = 0xFF;
+        *p++ = (char)0xFF;
+        *p++ = (char)0xFF;
+        *p++ = (char)0xFF;
     }
     
     // message_length, 3bytes, big-endian

@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -94,6 +94,8 @@ bool SrsBuffer::require(int required_size)
 void SrsBuffer::skip(int size)
 {
     srs_assert(p);
+    srs_assert(p + size >= bytes);
+    srs_assert(p + size <= bytes + nb_bytes);
     
     p += size;
 }
@@ -251,22 +253,15 @@ void SrsBuffer::write_bytes(char* data, int size)
     p += size;
 }
 
-SrsBitBuffer::SrsBitBuffer()
+SrsBitBuffer::SrsBitBuffer(SrsBuffer* b)
 {
     cb = 0;
     cb_left = 0;
-    stream = NULL;
+    stream = b;
 }
 
 SrsBitBuffer::~SrsBitBuffer()
 {
-}
-
-srs_error_t SrsBitBuffer::initialize(SrsBuffer* s) {
-    stream = s;
-    cb = 0;
-    cb_left = 0;
-    return srs_success;
 }
 
 bool SrsBitBuffer::empty() {

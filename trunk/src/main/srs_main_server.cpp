@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -118,17 +118,15 @@ srs_error_t do_main(int argc, char** argv)
     }
     
     // config already applied to log.
-    srs_trace(RTMP_SIG_SRS_SERVER ", stable is " RTMP_SIG_SRS_PRIMARY);
-    srs_trace("license: " RTMP_SIG_SRS_LICENSE ", " RTMP_SIG_SRS_COPYRIGHT);
-    srs_trace("authors: " RTMP_SIG_SRS_AUTHROS);
-    srs_trace("contributors: " SRS_AUTO_CONSTRIBUTORS);
-    srs_trace("build: %s, configure:%s, uname: %s", SRS_AUTO_BUILD_DATE, SRS_AUTO_USER_CONFIGURE, SRS_AUTO_UNAME);
+    srs_trace("%s, %s", RTMP_SIG_SRS_SERVER, RTMP_SIG_SRS_LICENSE);
+    srs_trace("contributors: %s", SRS_AUTO_CONSTRIBUTORS);
+    srs_trace("cwd=%s, work_dir=%s, build: %s, configure: %s, uname: %s",
+        _srs_config->cwd().c_str(), cwd.c_str(), SRS_AUTO_BUILD_DATE, SRS_AUTO_USER_CONFIGURE, SRS_AUTO_UNAME);
     srs_trace("configure detail: " SRS_AUTO_CONFIGURE);
 #ifdef SRS_AUTO_EMBEDED_TOOL_CHAIN
     srs_trace("crossbuild tool chain: " SRS_AUTO_EMBEDED_TOOL_CHAIN);
 #endif
-    srs_trace("cwd=%s, work_dir=%s", _srs_config->cwd().c_str(), cwd.c_str());
-    
+
     // for memory check or detect.
     if (true) {
         stringstream ss;
@@ -212,9 +210,9 @@ void show_macro_features()
         ss << "features";
         
         // rch(rtmp complex handshake)
-        ss << ", rch:" << srs_bool2switch(SRS_AUTO_SSL_BOOL);
+        ss << ", rch:" << srs_bool2switch(true);
         ss << ", dash:" << "on";
-        ss << ", hls:" << srs_bool2switch(SRS_AUTO_HLS_BOOL);
+        ss << ", hls:" << srs_bool2switch(true);
         ss << ", hds:" << srs_bool2switch(SRS_AUTO_HDS_BOOL);
         // hc(http callback)
         ss << ", hc:" << srs_bool2switch(true);
@@ -224,40 +222,20 @@ void show_macro_features()
         ss << ", hs:" << srs_bool2switch(true);
         // hp(http parser)
         ss << ", hp:" << srs_bool2switch(true);
-        ss << ", dvr:" << srs_bool2switch(SRS_AUTO_DVR_BOOL);
+        ss << ", dvr:" << srs_bool2switch(true);
         // trans(transcode)
-        ss << ", trans:" << srs_bool2switch(SRS_AUTO_TRANSCODE_BOOL);
+        ss << ", trans:" << srs_bool2switch(true);
         // inge(ingest)
-        ss << ", inge:" << srs_bool2switch(SRS_AUTO_INGEST_BOOL);
-        ss << ", kafka:" << srs_bool2switch(SRS_AUTO_KAFKA_BOOL);
-        ss << ", stat:" << srs_bool2switch(SRS_AUTO_STAT_BOOL);
-        ss << ", nginx:" << srs_bool2switch(SRS_AUTO_NGINX_BOOL);
-        // ff(ffmpeg)
-        ss << ", ff:" << srs_bool2switch(SRS_AUTO_FFMPEG_TOOL_BOOL);
+        ss << ", inge:" << srs_bool2switch(true);
+        ss << ", stat:" << srs_bool2switch(true);
         // sc(stream-caster)
-        ss << ", sc:" << srs_bool2switch(SRS_AUTO_STREAM_CASTER_BOOL);
+        ss << ", sc:" << srs_bool2switch(true);
         srs_trace(ss.str().c_str());
     }
     
     if (true) {
         stringstream ss;
         ss << "SRS on ";
-#ifdef SRS_OSX
-        ss << "OSX";
-#endif
-#ifdef SRS_PI
-        ss << "RespberryPi";
-#endif
-#ifdef SRS_CUBIE
-        ss << "CubieBoard";
-#endif
-#ifdef SRS_ARM_UBUNTU12
-        ss << "ARM(build on ubuntu)";
-#endif
-#ifdef SRS_MIPS_UBUNTU12
-        ss << "MIPS(build on ubuntu)";
-#endif
-        
 #if defined(__amd64__)
         ss << " amd64";
 #endif
@@ -270,9 +248,11 @@ void show_macro_features()
 #if defined(__arm__)
         ss << "arm";
 #endif
-        
-#ifndef SRS_OSX
-        ss << ", glibc" << (int)__GLIBC__ << "." <<  (int)__GLIBC_MINOR__;
+#if defined(__aarch64__)
+        ss << " aarch64";
+#endif
+#if defined(SRS_AUTO_CROSSBUILD)
+        ss << "(crossbuild)";
 #endif
         
         ss << ", conf:" << _srs_config->config() << ", limit:" << _srs_config->get_max_connections()
@@ -286,7 +266,7 @@ void show_macro_features()
         stringstream ss;
         
         // mw(merged-write)
-        ss << "mw sleep:" << SRS_PERF_MW_SLEEP << "ms";
+        ss << "mw sleep:" << srsu2msi(SRS_PERF_MW_SLEEP) << "ms";
         
         // mr(merged-read)
         ss << ". mr ";
@@ -295,7 +275,7 @@ void show_macro_features()
 #else
         ss << "enabled:off";
 #endif
-        ss << ", default:" << SRS_PERF_MR_ENABLED << ", sleep:" << SRS_PERF_MR_SLEEP << "ms";
+        ss << ", default:" << SRS_PERF_MR_ENABLED << ", sleep:" << srsu2msi(SRS_PERF_MR_SLEEP) << "ms";
         
         srs_trace(ss.str().c_str());
     }
@@ -306,7 +286,7 @@ void show_macro_features()
         // gc(gop-cache)
         ss << "gc:" << srs_bool2switch(SRS_PERF_GOP_CACHE);
         // pq(play-queue)
-        ss << ", pq:" << SRS_PERF_PLAY_QUEUE << "s";
+        ss << ", pq:" << srsu2msi(SRS_PERF_PLAY_QUEUE) << "ms";
         // cscc(chunk stream cache cid)
         ss << ", cscc:[0," << SRS_PERF_CHUNK_STREAM_CACHE << ")";
         // csa(complex send algorithm)
@@ -339,10 +319,10 @@ void show_macro_features()
     // others
     int possible_mr_latency = 0;
 #ifdef SRS_PERF_MERGED_READ
-    possible_mr_latency = SRS_PERF_MR_SLEEP;
+    possible_mr_latency = srsu2msi(SRS_PERF_MR_SLEEP);
 #endif
-    srs_trace("system default latency in ms: mw(0-%d) + mr(0-%d) + play-queue(0-%d)",
-              SRS_PERF_MW_SLEEP, possible_mr_latency, SRS_PERF_PLAY_QUEUE*1000);
+    srs_trace("system default latency(ms): mw(0-%d) + mr(0-%d) + play-queue(0-%d)",
+              srsu2msi(SRS_PERF_MW_SLEEP), possible_mr_latency, srsu2msi(SRS_PERF_PLAY_QUEUE));
     
 #ifdef SRS_AUTO_MEM_WATCH
 #warning "srs memory watcher will hurts performance. user should kill by SIGTERM or init.d script."
@@ -373,25 +353,21 @@ string srs_getenv(const char* name)
 srs_error_t run(SrsServer* svr)
 {
     srs_error_t err = srs_success;
-    
-    /**
-     * we do nothing in the constructor of server,
-     * and use initialize to create members, set hooks for instance the reload handler,
-     * all initialize will done in this stage.
-     */
+
+    // Initialize the whole system, set hooks to handle server level events.
     if ((err = svr->initialize(NULL)) != srs_success) {
         return srs_error_wrap(err, "server initialize");
     }
     
-    // if not deamon, directly run master.
-    if (!_srs_config->get_deamon()) {
+    // If not daemon, directly run master.
+    if (!_srs_config->get_daemon()) {
         if ((err = run_master(svr)) != srs_success) {
             return srs_error_wrap(err, "run master");
         }
         return srs_success;
     }
     
-    srs_trace("start deamon mode...");
+    srs_trace("start daemon mode...");
     
     int pid = fork();
     
@@ -420,7 +396,7 @@ srs_error_t run(SrsServer* svr)
     }
     
     // son
-    srs_trace("son(deamon) process running.");
+    srs_trace("son(daemon) process running.");
     
     if ((err = run_master(svr)) != srs_success) {
         return srs_error_wrap(err, "daemon run master");

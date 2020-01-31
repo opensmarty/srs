@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -46,15 +46,13 @@ using namespace std;
 #include <srs_protocol_utility.hpp>
 #include <srs_protocol_format.hpp>
 
-#ifdef SRS_AUTO_STREAM_CASTER
-
 SrsRtpConn::SrsRtpConn(SrsRtspConn* r, int p, int sid)
 {
     rtsp = r;
     _port = p;
     stream_id = sid;
     // TODO: support listen at <[ip:]port>
-    listener = new SrsUdpListener(this, srs_any_address4listener(), p);
+    listener = new SrsUdpListener(this, srs_any_address_for_listener(), p);
     cache = new SrsRtpPacket();
     pprint = SrsPithyPrint::create_caster();
 }
@@ -389,10 +387,9 @@ srs_error_t SrsRtspConn::cycle()
     
     if (err == srs_success) {
         srs_trace("client finished.");
-    } else if (srs_is_client_gracefully_close(srs_error_code(err))) {
+    } else if (srs_is_client_gracefully_close(err)) {
         srs_warn("client disconnect peer. code=%d", srs_error_code(err));
         srs_freep(err);
-        err = srs_success;
     }
     
     if (video_rtp) {
@@ -651,13 +648,13 @@ srs_error_t SrsRtspConn::connect()
     }
     
     // connect host.
-    int64_t cto = SRS_CONSTS_RTMP_TMMS;
-    int64_t sto = SRS_CONSTS_RTMP_PULSE_TMMS;
+    srs_utime_t cto = SRS_CONSTS_RTMP_TIMEOUT;
+    srs_utime_t sto = SRS_CONSTS_RTMP_PULSE;
     sdk = new SrsSimpleRtmpClient(url, cto, sto);
     
     if ((err = sdk->connect()) != srs_success) {
         close();
-        return srs_error_wrap(err, "connect %s failed, cto=%" PRId64 ", sto=%" PRId64, url.c_str(), cto, sto);
+        return srs_error_wrap(err, "connect %s failed, cto=%dms, sto=%dms.", url.c_str(), srsu2msi(cto), srsu2msi(sto));
     }
     
     // publish.
@@ -745,6 +742,4 @@ void SrsRtspCaster::remove(SrsRtspConn* conn)
     
     srs_freep(conn);
 }
-
-#endif
 

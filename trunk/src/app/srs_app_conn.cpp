@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -36,10 +36,11 @@ SrsConnection::SrsConnection(IConnectionManager* cm, srs_netfd_t c, string cip)
     manager = cm;
     stfd = c;
     ip = cip;
-    create_time = srs_get_system_time_ms();
+    create_time = srsu2ms(srs_get_system_time());
     
     skt = new SrsStSocket();
-    kbps = new SrsKbps();
+    clk = new SrsWallClock();
+    kbps = new SrsKbps(clk);
     kbps->set_io(skt, skt);
     
     trd = new SrsSTCoroutine("conn", this);
@@ -50,30 +51,16 @@ SrsConnection::~SrsConnection()
     dispose();
     
     srs_freep(kbps);
+    srs_freep(clk);
     srs_freep(skt);
     srs_freep(trd);
     
     srs_close_stfd(stfd);
 }
 
-void SrsConnection::resample()
+void SrsConnection::remark(int64_t* in, int64_t* out)
 {
-    kbps->resample();
-}
-
-int64_t SrsConnection::get_send_bytes_delta()
-{
-    return kbps->get_send_bytes_delta();
-}
-
-int64_t SrsConnection::get_recv_bytes_delta()
-{
-    return kbps->get_recv_bytes_delta();
-}
-
-void SrsConnection::cleanup()
-{
-    kbps->cleanup();
+    kbps->remark(in, out);
 }
 
 void SrsConnection::dispose()
@@ -127,7 +114,7 @@ srs_error_t SrsConnection::set_tcp_nodelay(bool v)
     return err;
 }
 
-srs_error_t SrsConnection::set_socket_buffer(int buffer_ms)
+srs_error_t SrsConnection::set_socket_buffer(srs_utime_t buffer_v)
 {
     srs_error_t err = srs_success;
     
@@ -156,7 +143,7 @@ srs_error_t SrsConnection::set_socket_buffer(int buffer_ms)
     //      2000*3000/8=750000B(about 732KB).
     //      2000*5000/8=1250000B(about 1220KB).
     int kbps = 4000;
-    int iv = buffer_ms * kbps / 8;
+    int iv = srsu2ms(buffer_v) * kbps / 8;
     
     // socket send buffer, system will double it.
     iv = iv / 2;
@@ -174,7 +161,7 @@ srs_error_t SrsConnection::set_socket_buffer(int buffer_ms)
         return srs_error_new(ERROR_SOCKET_SNDBUF, "getsockopt fd=%d, r0=%d", fd, r0);
     }
     
-    srs_trace("set fd=%d, SO_SNDBUF=%d=>%d, buffer=%dms", fd, ov, iv, buffer_ms);
+    srs_trace("set fd=%d, SO_SNDBUF=%d=>%d, buffer=%dms", fd, ov, iv, srsu2ms(buffer_v));
     
     return err;
 }
@@ -194,10 +181,12 @@ srs_error_t SrsConnection::cycle()
     
     // client close peer.
     // TODO: FIXME: Only reset the error when client closed it.
-    if (srs_is_client_gracefully_close(srs_error_code(err))) {
+    if (srs_is_client_gracefully_close(err)) {
         srs_warn("client disconnect peer. ret=%d", srs_error_code(err));
+    } else if (srs_is_server_gracefully_close(err)) {
+        srs_warn("server disconnect. ret=%d", srs_error_code(err));
     } else {
-        srs_error("connect error %s", srs_error_desc(err).c_str());
+        srs_error("serve error %s", srs_error_desc(err).c_str());
     }
     
     srs_freep(err);
@@ -207,6 +196,10 @@ srs_error_t SrsConnection::cycle()
 int SrsConnection::srs_id()
 {
     return trd->cid();
+}
+
+string SrsConnection::remote_ip() {
+    return ip;
 }
 
 void SrsConnection::expire()

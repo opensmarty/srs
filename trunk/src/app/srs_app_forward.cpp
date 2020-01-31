@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -85,7 +85,7 @@ srs_error_t SrsForwarder::initialize(SrsRequest* r, string ep)
     return err;
 }
 
-void SrsForwarder::set_queue_size(double queue_size)
+void SrsForwarder::set_queue_size(srs_utime_t queue_size)
 {
     queue->set_queue_size(queue_size);
 }
@@ -174,7 +174,7 @@ srs_error_t SrsForwarder::on_video(SrsSharedPtrMessage* shared_video)
 }
 
 // when error, forwarder sleep for a while and retry.
-#define SRS_FORWARDER_CIMS (3000)
+#define SRS_FORWARDER_CIMS (3 * SRS_UTIME_SECONDS)
 
 srs_error_t SrsForwarder::cycle()
 {
@@ -190,7 +190,7 @@ srs_error_t SrsForwarder::cycle()
             return srs_error_wrap(err, "forwarder");
         }
     
-        srs_usleep(SRS_FORWARDER_CIMS * 1000);
+        srs_usleep(SRS_FORWARDER_CIMS);
     }
     
     return err;
@@ -213,12 +213,12 @@ srs_error_t SrsForwarder::do_cycle()
     }
     
     srs_freep(sdk);
-    int64_t cto = SRS_FORWARDER_CIMS;
-    int64_t sto = SRS_CONSTS_RTMP_TMMS;
+    srs_utime_t cto = SRS_FORWARDER_CIMS;
+    srs_utime_t sto = SRS_CONSTS_RTMP_TIMEOUT;
     sdk = new SrsSimpleRtmpClient(url, cto, sto);
     
     if ((err = sdk->connect()) != srs_success) {
-        return srs_error_wrap(err, "sdk connect url=%s, cto=%" PRId64 ", sto=%" PRId64, url.c_str(), cto, sto);
+        return srs_error_wrap(err, "sdk connect url=%s, cto=%dms, sto=%dms.", url.c_str(), srsu2msi(cto), srsu2msi(sto));
     }
     
     if ((err = sdk->publish(_srs_config->get_chunk_size(req->vhost))) != srs_success) {
@@ -241,7 +241,7 @@ srs_error_t SrsForwarder::forward()
 {
     srs_error_t err = srs_success;
     
-    sdk->set_recv_timeout(SRS_CONSTS_RTMP_PULSE_TMMS);
+    sdk->set_recv_timeout(SRS_CONSTS_RTMP_PULSE);
     
     SrsPithyPrint* pprint = SrsPithyPrint::create_forwarder();
     SrsAutoFree(SrsPithyPrint, pprint);

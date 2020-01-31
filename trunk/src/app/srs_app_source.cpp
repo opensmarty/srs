@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -61,8 +61,8 @@ using namespace std;
 // when got these videos or audios, pure audio or video, mix ok.
 #define SRS_MIX_CORRECT_PURE_AV 10
 
-// the time to cleanup source in ms.
-#define SRS_SOURCE_CLEANUP 30000
+// the time to cleanup source.
+#define SRS_SOURCE_CLEANUP (30 * SRS_UTIME_SECONDS)
 
 int _srs_time_jitter_string2int(std::string time_jitter)
 {
@@ -154,7 +154,7 @@ int64_t SrsRtmpJitter::get_time()
 SrsFastVector::SrsFastVector()
 {
     count = 0;
-    nb_msgs = SRS_PERF_MW_MSGS * 8;
+    nb_msgs = 8;
     msgs = new SrsSharedPtrMessage*[nb_msgs];
 }
 
@@ -212,12 +212,12 @@ void SrsFastVector::push_back(SrsSharedPtrMessage* msg)
 {
     // increase vector.
     if (count >= nb_msgs) {
-        int size = nb_msgs * 2;
+        int size = srs_max(SRS_PERF_MW_MSGS * 8, nb_msgs * 2);
         SrsSharedPtrMessage** buf = new SrsSharedPtrMessage*[size];
         for (int i = 0; i < nb_msgs; i++) {
             buf[i] = msgs[i];
         }
-        srs_warn("fast vector incrase %d=>%d", nb_msgs, size);
+        srs_info("fast vector incrase %d=>%d", nb_msgs, size);
         
         // use new array.
         srs_freepa(msgs);
@@ -241,7 +241,7 @@ void SrsFastVector::free()
 SrsMessageQueue::SrsMessageQueue(bool ignore_shrink)
 {
     _ignore_shrink = ignore_shrink;
-    queue_size_ms = 0;
+    max_queue_size = 0;
     av_start_time = av_end_time = -1;
 }
 
@@ -255,14 +255,14 @@ int SrsMessageQueue::size()
     return (int)msgs.size();
 }
 
-int SrsMessageQueue::duration()
+srs_utime_t SrsMessageQueue::duration()
 {
-    return (int)(av_end_time - av_start_time);
+    return (av_end_time - av_start_time);
 }
 
-void SrsMessageQueue::set_queue_size(double queue_size)
+void SrsMessageQueue::set_queue_size(srs_utime_t queue_size)
 {
-    queue_size_ms = (int)(queue_size * 1000);
+	max_queue_size = queue_size;
 }
 
 srs_error_t SrsMessageQueue::enqueue(SrsSharedPtrMessage* msg, bool* is_overflow)
@@ -271,15 +271,15 @@ srs_error_t SrsMessageQueue::enqueue(SrsSharedPtrMessage* msg, bool* is_overflow
     
     if (msg->is_av()) {
         if (av_start_time == -1) {
-            av_start_time = msg->timestamp;
+            av_start_time = srs_utime_t(msg->timestamp * SRS_UTIME_MILLISECONDS);
         }
         
-        av_end_time = msg->timestamp;
+        av_end_time = srs_utime_t(msg->timestamp * SRS_UTIME_MILLISECONDS);
     }
     
     msgs.push_back(msg);
     
-    while (av_end_time - av_start_time > queue_size_ms) {
+    while (av_end_time - av_start_time > max_queue_size) {
         // notice the caller queue already overflow and shrinked.
         if (is_overflow) {
             *is_overflow = true;
@@ -309,7 +309,7 @@ srs_error_t SrsMessageQueue::dump_packets(int max_count, SrsSharedPtrMessage** p
     }
     
     SrsSharedPtrMessage* last = omsgs[count - 1];
-    av_start_time = last->timestamp;
+    av_start_time = srs_utime_t(last->timestamp * SRS_UTIME_MILLISECONDS);
     
     if (count >= nb_msgs) {
         // the pmsgs is big enough and clear msgs at most time.
@@ -375,17 +375,16 @@ void SrsMessageQueue::shrink()
     av_start_time = av_end_time;
     //push_back secquence header and update timestamp
     if (video_sh) {
-        video_sh->timestamp = av_end_time;
+        video_sh->timestamp = srsu2ms(av_end_time);
         msgs.push_back(video_sh);
     }
     if (audio_sh) {
-        audio_sh->timestamp = av_end_time;
+        audio_sh->timestamp = srsu2ms(av_end_time);
         msgs.push_back(audio_sh);
     }
     
     if (!_ignore_shrink) {
-        srs_trace("shrink the cache queue, size=%d, removed=%d, max=%.2f",
-                  (int)msgs.size(), msgs_size - (int)msgs.size(), queue_size_ms / 1000.0);
+        srs_trace("shrinking, size=%d, removed=%d, max=%dms", (int)msgs.size(), msgs_size - (int)msgs.size(), srsu2msi(max_queue_size));
     }
 }
 
@@ -443,7 +442,7 @@ SrsConsumer::~SrsConsumer()
 #endif
 }
 
-void SrsConsumer::set_queue_size(double queue_size)
+void SrsConsumer::set_queue_size(srs_utime_t queue_size)
 {
     queue->set_queue_size(queue_size);
 }
@@ -477,20 +476,20 @@ srs_error_t SrsConsumer::enqueue(SrsSharedPtrMessage* shared_msg, bool atc, SrsR
 #ifdef SRS_PERF_QUEUE_COND_WAIT
     // fire the mw when msgs is enough.
     if (mw_waiting) {
-        int duration_ms = queue->duration();
+        srs_utime_t duration = queue->duration();
         bool match_min_msgs = queue->size() > mw_min_msgs;
         
         // For ATC, maybe the SH timestamp bigger than A/V packet,
         // when encoder republish or overflow.
         // @see https://github.com/ossrs/srs/pull/749
-        if (atc && duration_ms < 0) {
+        if (atc && duration < 0) {
             srs_cond_signal(mw_wait);
             mw_waiting = false;
             return err;
         }
         
         // when duration ok, signal to flush.
-        if (match_min_msgs && duration_ms > mw_duration) {
+        if (match_min_msgs && duration > mw_duration) {
             srs_cond_signal(mw_wait);
             mw_waiting = false;
             return err;
@@ -534,21 +533,21 @@ srs_error_t SrsConsumer::dump_packets(SrsMessageArray* msgs, int& count)
 }
 
 #ifdef SRS_PERF_QUEUE_COND_WAIT
-void SrsConsumer::wait(int nb_msgs, int duration)
+void SrsConsumer::wait(int nb_msgs, srs_utime_t msgs_duration)
 {
     if (paused) {
-        srs_usleep(SRS_CONSTS_RTMP_PULSE_TMMS * 1000);
+        srs_usleep(SRS_CONSTS_RTMP_PULSE);
         return;
     }
     
     mw_min_msgs = nb_msgs;
-    mw_duration = duration;
+    mw_duration = msgs_duration;
     
-    int duration_ms = queue->duration();
+    srs_utime_t duration = queue->duration();
     bool match_min_msgs = queue->size() > mw_min_msgs;
     
     // when duration ok, signal to flush.
-    if (match_min_msgs && duration_ms > mw_duration) {
+    if (match_min_msgs && duration > mw_duration) {
         return;
     }
     
@@ -699,7 +698,7 @@ bool SrsGopCache::empty()
     return gop_cache.empty();
 }
 
-int64_t SrsGopCache::start_time()
+srs_utime_t SrsGopCache::start_time()
 {
     if (empty()) {
         return 0;
@@ -708,7 +707,7 @@ int64_t SrsGopCache::start_time()
     SrsSharedPtrMessage* msg = gop_cache[0];
     srs_assert(msg);
     
-    return msg->timestamp;
+    return srs_utime_t(msg->timestamp * SRS_UTIME_MILLISECONDS);
 }
 
 bool SrsGopCache::pure_audio()
@@ -824,9 +823,7 @@ SrsOriginHub::SrsOriginHub()
     hls = new SrsHls();
     dash = new SrsDash();
     dvr = new SrsDvr();
-#ifdef SRS_AUTO_TRANSCODE
     encoder = new SrsEncoder();
-#endif
 #ifdef SRS_AUTO_HDS
     hds = new SrsHds();
 #endif
@@ -854,9 +851,7 @@ SrsOriginHub::~SrsOriginHub()
     srs_freep(hls);
     srs_freep(dash);
     srs_freep(dvr);
-#ifdef SRS_AUTO_TRANSCODE
     srs_freep(encoder);
-#endif
 #ifdef SRS_AUTO_HDS
     srs_freep(hds);
 #endif
@@ -906,6 +901,11 @@ srs_error_t SrsOriginHub::cycle()
     // TODO: Support cycle DASH.
     
     return err;
+}
+
+bool SrsOriginHub::active()
+{
+    return is_active;
 }
 
 srs_error_t SrsOriginHub::on_meta_data(SrsSharedPtrMessage* shared_metadata, SrsOnMetaDataPacket* packet)
@@ -1052,6 +1052,12 @@ srs_error_t SrsOriginHub::on_video(SrsSharedPtrMessage* shared_video, bool is_se
                   srs_avc_level2str(c->avc_level).c_str(), c->width, c->height,
                   c->video_data_rate / 1000, c->frame_rate, c->duration);
     }
+
+    // Ignore video data when no sps/pps
+    // @bug https://github.com/ossrs/srs/issues/703#issuecomment-578393155
+    if (format->vcodec && !format->vcodec->is_avc_codec_ok()) {
+        return err;
+    }
     
     if ((err = hls->on_video(msg, format)) != srs_success) {
         // apply the error strategy for hls.
@@ -1116,11 +1122,9 @@ srs_error_t SrsOriginHub::on_publish()
     }
     
     // TODO: FIXME: use initialize to set req.
-#ifdef SRS_AUTO_TRANSCODE
     if ((err = encoder->on_publish(req)) != srs_success) {
         return srs_error_wrap(err, "encoder publish");
     }
-#endif
     
     if ((err = hls->on_publish()) != srs_success) {
         return srs_error_wrap(err, "hls publish");
@@ -1158,10 +1162,7 @@ void SrsOriginHub::on_unpublish()
     // destroy all forwarders
     destroy_forwarders();
     
-#ifdef SRS_AUTO_TRANSCODE
     encoder->on_unpublish();
-#endif
-    
     hls->on_unpublish();
     dash->on_unpublish();
     dvr->on_unpublish();
@@ -1419,7 +1420,6 @@ srs_error_t SrsOriginHub::on_reload_vhost_transcode(string vhost)
     
     // TODO: FIXME: maybe should ignore when publish already stopped?
     
-#ifdef SRS_AUTO_TRANSCODE
     encoder->on_unpublish();
     
     // Don't start transcode when source is not active.
@@ -1431,7 +1431,6 @@ srs_error_t SrsOriginHub::on_reload_vhost_transcode(string vhost)
         return srs_error_wrap(err, "start encoder failed");
     }
     srs_trace("vhost %s transcode reload success", vhost.c_str());
-#endif
     
     return err;
 }
@@ -1480,9 +1479,8 @@ srs_error_t SrsOriginHub::create_forwarders()
         if ((err = forwarder->initialize(req, forward_server)) != srs_success) {
             return srs_error_wrap(err, "init forwarder");
         }
-        
-        // TODO: FIXME: support queue size.
-        double queue_size = _srs_config->get_queue_length(req->vhost);
+
+        srs_utime_t queue_size = _srs_config->get_queue_length(req->vhost);
         forwarder->set_queue_size(queue_size);
         
         if ((err = forwarder->on_publish()) != srs_success) {
@@ -1603,9 +1601,7 @@ srs_error_t SrsMetaCache::update_data(SrsMessageHeader* header, SrsOnMetaDataPac
     
     // add server info to metadata
     metadata->metadata->set("server", SrsAmf0Any::str(RTMP_SIG_SRS_SERVER));
-    metadata->metadata->set("srs_primary", SrsAmf0Any::str(RTMP_SIG_SRS_PRIMARY));
-    metadata->metadata->set("srs_authors", SrsAmf0Any::str(RTMP_SIG_SRS_AUTHROS));
-    
+
     // version, for example, 1.0.0
     // add version to metadata, please donot remove it, for debug.
     metadata->metadata->set("server_version", SrsAmf0Any::str(RTMP_SIG_SRS_VERSION));
@@ -1650,11 +1646,30 @@ srs_error_t SrsMetaCache::update_vsh(SrsSharedPtrMessage* msg)
     return vformat->on_video(msg);
 }
 
-std::map<std::string, SrsSource*> SrsSource::pool;
+SrsSourceManager* _srs_sources = new SrsSourceManager();
 
-srs_error_t SrsSource::fetch_or_create(SrsRequest* r, ISrsSourceHandler* h, SrsSource** pps)
+SrsSourceManager::SrsSourceManager()
+{
+    lock = NULL;
+}
+
+SrsSourceManager::~SrsSourceManager()
+{
+    srs_mutex_destroy(lock);
+}
+
+srs_error_t SrsSourceManager::fetch_or_create(SrsRequest* r, ISrsSourceHandler* h, SrsSource** pps)
 {
     srs_error_t err = srs_success;
+
+    // Lazy create lock, because ST is not ready in SrsSourceManager constructor.
+    if (!lock) {
+        lock = srs_mutex_new();
+    }
+
+    // Use lock to protect coroutine switch.
+    // @bug https://github.com/ossrs/srs/issues/1230
+    SrsLocker(lock);
     
     SrsSource* source = NULL;
     if ((source = fetch(r)) != NULL) {
@@ -1680,7 +1695,7 @@ srs_error_t SrsSource::fetch_or_create(SrsRequest* r, ISrsSourceHandler* h, SrsS
     return err;
 }
 
-SrsSource* SrsSource::fetch(SrsRequest* r)
+SrsSource* SrsSourceManager::fetch(SrsRequest* r)
 {
     SrsSource* source = NULL;
     
@@ -1694,12 +1709,12 @@ SrsSource* SrsSource::fetch(SrsRequest* r)
     // we always update the request of resource,
     // for origin auth is on, the token in request maybe invalid,
     // and we only need to update the token of request, it's simple.
-    source->req->update_auth(r);
+    source->update_auth(r);
     
     return source;
 }
 
-void SrsSource::dispose_all()
+void SrsSourceManager::dispose()
 {
     std::map<std::string, SrsSource*>::iterator it;
     for (it = pool.begin(); it != pool.end(); ++it) {
@@ -1709,16 +1724,16 @@ void SrsSource::dispose_all()
     return;
 }
 
-srs_error_t SrsSource::cycle_all()
+srs_error_t SrsSourceManager::cycle()
 {
     int cid = _srs_context->get_id();
-    srs_error_t err = do_cycle_all();
+    srs_error_t err = do_cycle();
     _srs_context->set_id(cid);
     
     return err;
 }
 
-srs_error_t SrsSource::do_cycle_all()
+srs_error_t SrsSourceManager::do_cycle()
 {
     srs_error_t err = srs_success;
     
@@ -1759,7 +1774,7 @@ srs_error_t SrsSource::do_cycle_all()
     return err;
 }
 
-void SrsSource::destroy()
+void SrsSourceManager::destroy()
 {
     std::map<std::string, SrsSource*>::iterator it;
     for (it = pool.begin(); it != pool.end(); ++it) {
@@ -1778,7 +1793,7 @@ SrsSource::SrsSource()
     
     _can_publish = true;
     _pre_source_id = _source_id = -1;
-    die_at = -1;
+    die_at = 0;
     
     play_edge = new SrsPlayEdge();
     publish_edge = new SrsPublishEdge();
@@ -1832,7 +1847,7 @@ srs_error_t SrsSource::cycle()
 bool SrsSource::expired()
 {
     // unknown state?
-    if (die_at == -1) {
+    if (die_at == 0) {
         return false;
     }
     
@@ -1846,7 +1861,7 @@ bool SrsSource::expired()
         return false;
     }
     
-    int64_t now = srs_get_system_time_ms();
+    srs_utime_t now = srs_get_system_time();
     if (now > die_at + SRS_SOURCE_CLEANUP) {
         return true;
     }
@@ -1876,7 +1891,7 @@ srs_error_t SrsSource::initialize(SrsRequest* r, ISrsSourceHandler* h)
         return srs_error_wrap(err, "edge(publish)");
     }
     
-    double queue_size = _srs_config->get_queue_length(req->vhost);
+    srs_utime_t queue_size = _srs_config->get_queue_length(req->vhost);
     publish_edge->set_queue_size(queue_size);
     
     jitter_algorithm = (SrsRtmpJitterAlgorithm)_srs_config->get_time_jitter(req->vhost);
@@ -1931,7 +1946,7 @@ srs_error_t SrsSource::on_reload_vhost_play(string vhost)
     
     // queue length
     if (true) {
-        double v = _srs_config->get_queue_length(req->vhost);
+        srs_utime_t v = _srs_config->get_queue_length(req->vhost);
         
         if (true) {
             std::vector<SrsConsumer*>::iterator it;
@@ -2007,6 +2022,11 @@ int SrsSource::pre_source_id()
 bool SrsSource::inactive()
 {
     return _can_publish;
+}
+
+void SrsSource::update_auth(SrsRequest* r)
+{
+    req->update_auth(r);
 }
 
 bool SrsSource::can_publish(bool is_edge)
@@ -2444,7 +2464,7 @@ void SrsSource::on_unpublish()
     
     // no consumer, stream is die.
     if (consumers.empty()) {
-        die_at = srs_get_system_time_ms();
+        die_at = srs_get_system_time();
     }
 }
 
@@ -2454,38 +2474,41 @@ srs_error_t SrsSource::create_consumer(SrsConnection* conn, SrsConsumer*& consum
     
     consumer = new SrsConsumer(this, conn);
     consumers.push_back(consumer);
-    
-    double queue_size = _srs_config->get_queue_length(req->vhost);
+
+    srs_utime_t queue_size = _srs_config->get_queue_length(req->vhost);
     consumer->set_queue_size(queue_size);
-    
+
     // if atc, update the sequence header to gop cache time.
     if (atc && !gop_cache->empty()) {
         if (meta->data()) {
-            meta->data()->timestamp = gop_cache->start_time();
+            meta->data()->timestamp = srsu2ms(gop_cache->start_time());
         }
         if (meta->vsh()) {
-            meta->vsh()->timestamp = gop_cache->start_time();
+            meta->vsh()->timestamp = srsu2ms(gop_cache->start_time());
         }
         if (meta->ash()) {
-            meta->ash()->timestamp = gop_cache->start_time();
+            meta->ash()->timestamp = srsu2ms(gop_cache->start_time());
         }
     }
-    
-    // Copy metadata and sequence header to consumer.
-    if ((err = meta->dumps(consumer, atc, jitter_algorithm, dm, ds)) != srs_success) {
-        return srs_error_wrap(err, "meta dumps");
+
+    // If stream is publishing, dumps the sequence header and gop cache.
+    if (hub->active()) {
+        // Copy metadata and sequence header to consumer.
+        if ((err = meta->dumps(consumer, atc, jitter_algorithm, dm, ds)) != srs_success) {
+            return srs_error_wrap(err, "meta dumps");
+        }
+
+        // copy gop cache to client.
+        if (dg && (err = gop_cache->dump(consumer, atc, jitter_algorithm)) != srs_success) {
+            return srs_error_wrap(err, "gop cache dumps");
+        }
     }
-    
-    // copy gop cache to client.
-    if (dg && (err = gop_cache->dump(consumer, atc, jitter_algorithm)) != srs_success) {
-        return srs_error_wrap(err, "gop cache dumps");
-    }
-    
+
     // print status.
     if (dg) {
-        srs_trace("create consumer, queue_size=%.2f, jitter=%d", queue_size, jitter_algorithm);
+        srs_trace("create consumer, active=%d, queue_size=%.2f, jitter=%d", hub->active(), queue_size, jitter_algorithm);
     } else {
-        srs_trace("create consumer, ignore gop cache, jitter=%d", jitter_algorithm);
+        srs_trace("create consumer, active=%d, ignore gop cache, jitter=%d", hub->active(), jitter_algorithm);
     }
     
     // for edge, when play edge stream, check the state
@@ -2509,7 +2532,7 @@ void SrsSource::on_consumer_destroy(SrsConsumer* consumer)
     
     if (consumers.empty()) {
         play_edge->on_all_client_stop();
-        die_at = srs_get_system_time_ms();
+        die_at = srs_get_system_time();
     }
 }
 
@@ -2528,6 +2551,7 @@ srs_error_t SrsSource::on_edge_start_publish()
     return publish_edge->on_client_publish();
 }
 
+// TODO: FIXME: Use edge strategy pattern.
 srs_error_t SrsSource::on_edge_proxy_publish(SrsCommonMessage* msg)
 {
     return publish_edge->on_proxy_publish(msg);
