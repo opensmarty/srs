@@ -444,6 +444,11 @@ VOID TEST(ProtocolUtilityTest, VhostResolve)
     srs_vhost_resolve(vhost, app, param);
     EXPECT_STREQ("changed1", vhost.c_str());
     EXPECT_STREQ("app", app.c_str());
+
+    app = "app?vhost=changed1&query=true";
+    srs_vhost_resolve(vhost, app, param);
+    EXPECT_STREQ("changed1", vhost.c_str());
+    EXPECT_STREQ("app", app.c_str());
     
     app = "app?other=true&&vhost=changed2&&query=true";
     srs_vhost_resolve(vhost, app, param);
@@ -579,6 +584,16 @@ VOID TEST(ProtocolUtilityTest, DiscoveryTcUrl)
     EXPECT_STREQ("live", app.c_str());
     EXPECT_STREQ("show", stream.c_str());
     EXPECT_STREQ("19351", port.c_str());
+
+    // _definst_ at the end of app
+    tcUrl = "rtmp://winlin.cn/live/_definst_"; stream= "show";
+    srs_discovery_tc_url(tcUrl, schema, ip, vhost, app, stream, port, param);
+    EXPECT_STREQ("rtmp", schema.c_str());
+    EXPECT_STREQ("winlin.cn", ip.c_str());
+    EXPECT_STREQ("winlin.cn", vhost.c_str());
+    EXPECT_STREQ("live", app.c_str());
+    EXPECT_STREQ("show", stream.c_str());
+    EXPECT_STREQ("1935", port.c_str());
 }
 
 /**
