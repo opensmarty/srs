@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -22,8 +22,6 @@
  */
 
 #include <srs_app_caster_flv.hpp>
-
-#ifdef SRS_AUTO_STREAM_CASTER
 
 #include <algorithm>
 using namespace std;
@@ -194,12 +192,12 @@ srs_error_t SrsDynamicHttpConn::do_proxy(ISrsHttpResponseReader* rr, SrsFlvDecod
     
     srs_freep(sdk);
     
-    int64_t cto = SRS_CONSTS_RTMP_TMMS;
-    int64_t sto = SRS_CONSTS_RTMP_PULSE_TMMS;
+    srs_utime_t cto = SRS_CONSTS_RTMP_TIMEOUT;
+    srs_utime_t sto = SRS_CONSTS_RTMP_PULSE;
     sdk = new SrsSimpleRtmpClient(output, cto, sto);
     
     if ((err = sdk->connect()) != srs_success) {
-        return srs_error_wrap(err, "connect %s failed, cto=%" PRId64 ", sto=%" PRId64, output.c_str(), cto, sto);
+        return srs_error_wrap(err, "connect %s failed, cto=%dms, sto=%dms.", output.c_str(), srsu2msi(cto), srsu2msi(sto));
     }
     
     if ((err = sdk->publish(SRS_CONSTS_RTMP_PROTOCOL_CHUNK_SIZE)) != srs_success) {
@@ -297,7 +295,7 @@ srs_error_t SrsHttpFileReader::read(void* buf, size_t count, ssize_t* pnread)
     
     int total_read = 0;
     while (total_read < (int)count) {
-        int nread = 0;
+        ssize_t nread = 0;
         if ((err = http->read((char*)buf + total_read, (int)(count - total_read), &nread)) != srs_success) {
             return srs_error_wrap(err, "read");
         }
@@ -308,7 +306,7 @@ srs_error_t SrsHttpFileReader::read(void* buf, size_t count, ssize_t* pnread)
         }
         
         srs_assert(nread);
-        total_read += nread;
+        total_read += (int)nread;
     }
     
     if (pnread) {
@@ -324,4 +322,3 @@ srs_error_t SrsHttpFileReader::lseek(off_t offset, int whence, off_t* seeked)
     return srs_success;
 }
 
-#endif

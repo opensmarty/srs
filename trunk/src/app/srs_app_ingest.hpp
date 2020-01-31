@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -26,8 +26,6 @@
 
 #include <srs_core.hpp>
 
-#ifdef SRS_AUTO_INGEST
-
 #include <vector>
 
 #include <srs_app_thread.hpp>
@@ -37,25 +35,23 @@ class SrsFFMPEG;
 class SrsConfDirective;
 class SrsPithyPrint;
 
-/**
- * ingester ffmpeg object.
- */
+// Ingester ffmpeg object.
 class SrsIngesterFFMPEG
 {
 private:
     std::string vhost;
     std::string id;
     SrsFFMPEG* ffmpeg;
-    int64_t starttime;
+    srs_utime_t starttime;
 public:
     SrsIngesterFFMPEG();
     virtual ~SrsIngesterFFMPEG();
 public:
     virtual srs_error_t initialize(SrsFFMPEG* ff, std::string v, std::string i);
-    // the ingest uri, [vhost]/[ingest id]
+    // The ingest uri, [vhost]/[ingest id]
     virtual std::string uri();
-    // the alive in ms.
-    virtual int alive();
+    // The alive in srs_utime_t.
+    virtual srs_utime_t alive();
     virtual bool equals(std::string v, std::string i);
     virtual bool equals(std::string v);
 public:
@@ -64,13 +60,12 @@ public:
     virtual srs_error_t cycle();
     // @see SrsFFMPEG.fast_stop().
     virtual void fast_stop();
+    virtual void fast_kill();
 };
 
-/**
- * ingest file/stream/device,
- * encode with FFMPEG(optional),
- * push to SRS(or any RTMP server) over RTMP.
- */
+// Ingest file/stream/device,
+// encode with FFMPEG(optional),
+// push to SRS(or any RTMP server) over RTMP.
 class SrsIngester : public ISrsCoroutineHandler, public ISrsReloadHandler
 {
 private:
@@ -78,10 +73,11 @@ private:
 private:
     SrsCoroutine* trd;
     SrsPithyPrint* pprint;
-    // whether the ingesters are expired,
-    // for example, the listen port changed,
+    // Whether the ingesters are expired, for example, the listen port changed,
     // all ingesters must be restart.
     bool expired;
+    // Whether already disposed.
+    bool disposed;
 public:
     SrsIngester();
     virtual ~SrsIngester();
@@ -91,8 +87,11 @@ public:
     virtual srs_error_t start();
     virtual void stop();
 private:
+    // Notify FFMPEG to fast stop.
     virtual void fast_stop();
-// interface ISrsReusableThreadHandler.
+    // When SRS quit, directly kill FFMPEG after fast stop.
+    virtual void fast_kill();
+// Interface ISrsReusableThreadHandler.
 public:
     virtual srs_error_t cycle();
 private:
@@ -104,7 +103,7 @@ private:
     virtual srs_error_t parse_engines(SrsConfDirective* vhost, SrsConfDirective* ingest);
     virtual srs_error_t initialize_ffmpeg(SrsFFMPEG* ffmpeg, SrsConfDirective* vhost, SrsConfDirective* ingest, SrsConfDirective* engine);
     virtual void show_ingest_log_message();
-// interface ISrsReloadHandler.
+// Interface ISrsReloadHandler.
 public:
     virtual srs_error_t on_reload_vhost_removed(std::string vhost);
     virtual srs_error_t on_reload_vhost_added(std::string vhost);
@@ -114,6 +113,5 @@ public:
     virtual srs_error_t on_reload_listen();
 };
 
-#endif
 #endif
 

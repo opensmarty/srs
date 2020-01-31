@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -34,8 +34,6 @@
 #include <srs_kernel_buffer.hpp>
 #include <srs_kernel_utility.hpp>
 
-#ifdef SRS_AUTO_SSL
-
 using namespace _srs_internal;
 
 // for openssl_HMACsha256
@@ -43,6 +41,9 @@ using namespace _srs_internal;
 #include <openssl/hmac.h>
 // for openssl_generate_key
 #include <openssl/dh.h>
+
+// For randomly generate the handshake bytes.
+#define RTMP_SIG_SRS_HANDSHAKE RTMP_SIG_SRS_KEY "(" RTMP_SIG_SRS_VERSION ")"
 
 #if OPENSSL_VERSION_NUMBER < 0x10100000L
 
@@ -136,7 +137,7 @@ namespace _srs_internal
         0x6E, 0xEC, 0x5D, 0x2D, 0x29, 0x80, 0x6F, 0xAB,
         0x93, 0xB8, 0xE6, 0x36, 0xCF, 0xEB, 0x31, 0xAE
     }; // 62
-    
+
     srs_error_t do_openssl_HMACsha256(HMAC_CTX* ctx, const void* data, int data_size, void* digest, unsigned int* digest_size)
     {
         srs_error_t err = srs_success;
@@ -151,6 +152,7 @@ namespace _srs_internal
         
         return err;
     }
+
     /**
      * sha256 digest algorithm.
      * @param key the sha256 key, NULL to use EVP_Digest, for instance,
@@ -200,24 +202,24 @@ namespace _srs_internal
         return err;
     }
     
-#define RFC2409_PRIME_1024 \
-"FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1" \
-"29024E088A67CC74020BBEA63B139B22514A08798E3404DD" \
-"EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245" \
-"E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED" \
-"EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE65381" \
-"FFFFFFFFFFFFFFFF"
-    
+    #define RFC2409_PRIME_1024 \
+        "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1" \
+        "29024E088A67CC74020BBEA63B139B22514A08798E3404DD" \
+        "EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245" \
+        "E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED" \
+        "EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE65381" \
+        "FFFFFFFFFFFFFFFF"
+
     SrsDH::SrsDH()
     {
         pdh = NULL;
     }
-    
+
     SrsDH::~SrsDH()
     {
         close();
     }
-    
+
     void SrsDH::close()
     {
         if (pdh != NULL) {
@@ -1084,8 +1086,6 @@ namespace _srs_internal
     }
 }
 
-#endif
-
 SrsSimpleHandshake::SrsSimpleHandshake()
 {
 }
@@ -1094,7 +1094,7 @@ SrsSimpleHandshake::~SrsSimpleHandshake()
 {
 }
 
-srs_error_t SrsSimpleHandshake::handshake_with_client(SrsHandshakeBytes* hs_bytes, ISrsProtocolReaderWriter* io)
+srs_error_t SrsSimpleHandshake::handshake_with_client(SrsHandshakeBytes* hs_bytes, ISrsProtocolReadWriter* io)
 {
     srs_error_t err = srs_success;
     
@@ -1126,7 +1126,7 @@ srs_error_t SrsSimpleHandshake::handshake_with_client(SrsHandshakeBytes* hs_byte
     return err;
 }
 
-srs_error_t SrsSimpleHandshake::handshake_with_server(SrsHandshakeBytes* hs_bytes, ISrsProtocolReaderWriter* io)
+srs_error_t SrsSimpleHandshake::handshake_with_server(SrsHandshakeBytes* hs_bytes, ISrsProtocolReadWriter* io)
 {
     srs_error_t err = srs_success;
     
@@ -1175,14 +1175,7 @@ SrsComplexHandshake::~SrsComplexHandshake()
 {
 }
 
-#ifndef SRS_AUTO_SSL
-srs_error_t SrsComplexHandshake::handshake_with_client(SrsHandshakeBytes* /*hs_bytes*/, ISrsProtocolReaderWriter* /*io*/)
-{
-    srs_trace("directly use simple handshake for ssl disabled.");
-    return srs_error_new(ERROR_RTMP_TRY_SIMPLE_HS, "try simple handshake");
-}
-#else
-srs_error_t SrsComplexHandshake::handshake_with_client(SrsHandshakeBytes* hs_bytes, ISrsProtocolReaderWriter* io)
+srs_error_t SrsComplexHandshake::handshake_with_client(SrsHandshakeBytes* hs_bytes, ISrsProtocolReadWriter* io)
 {
     srs_error_t err = srs_success;
     
@@ -1265,15 +1258,8 @@ srs_error_t SrsComplexHandshake::handshake_with_client(SrsHandshakeBytes* hs_byt
     
     return err;
 }
-#endif
 
-#ifndef SRS_AUTO_SSL
-srs_error_t SrsComplexHandshake::handshake_with_server(SrsHandshakeBytes* /*hs_bytes*/, ISrsProtocolReaderWriter* /*io*/)
-{
-    return srs_error_new(ERROR_RTMP_TRY_SIMPLE_HS, "try simple handshake");
-}
-#else
-srs_error_t SrsComplexHandshake::handshake_with_server(SrsHandshakeBytes* hs_bytes, ISrsProtocolReaderWriter* io)
+srs_error_t SrsComplexHandshake::handshake_with_server(SrsHandshakeBytes* hs_bytes, ISrsProtocolReadWriter* io)
 {
     srs_error_t err = srs_success;
     
@@ -1346,6 +1332,4 @@ srs_error_t SrsComplexHandshake::handshake_with_server(SrsHandshakeBytes* hs_byt
     
     return err;
 }
-#endif
-
 

@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -550,10 +550,7 @@ srs_error_t SrsGoApiAuthors::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessa
     SrsJsonObject* data = SrsJsonAny::object();
     obj->set("data", data);
     
-    data->set("primary", SrsJsonAny::str(RTMP_SIG_SRS_PRIMARY));
     data->set("license", SrsJsonAny::str(RTMP_SIG_SRS_LICENSE));
-    data->set("copyright", SrsJsonAny::str(RTMP_SIG_SRS_COPYRIGHT));
-    data->set("authors", SrsJsonAny::str(RTMP_SIG_SRS_AUTHROS));
     data->set("contributors", SrsJsonAny::str(SRS_AUTO_CONSTRIBUTORS));
     
     return srs_api_response(w, r, obj->dumps());
@@ -588,11 +585,7 @@ srs_error_t SrsGoApiFeatures::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
     SrsJsonObject* features = SrsJsonAny::object();
     data->set("features", features);
     
-#ifdef SRS_AUTO_SSL
     features->set("ssl", SrsJsonAny::boolean(true));
-#else
-    features->set("ssl", SrsJsonAny::boolean(false));
-#endif
     features->set("hls", SrsJsonAny::boolean(true));
 #ifdef SRS_AUTO_HDS
     features->set("hds", SrsJsonAny::boolean(true));
@@ -603,36 +596,10 @@ srs_error_t SrsGoApiFeatures::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
     features->set("api", SrsJsonAny::boolean(true));
     features->set("httpd", SrsJsonAny::boolean(true));
     features->set("dvr", SrsJsonAny::boolean(true));
-#ifdef SRS_AUTO_TRANSCODE
     features->set("transcode", SrsJsonAny::boolean(true));
-#else
-    features->set("transcode", SrsJsonAny::boolean(false));
-#endif
-#ifdef SRS_AUTO_INGEST
     features->set("ingest", SrsJsonAny::boolean(true));
-#else
-    features->set("ingest", SrsJsonAny::boolean(false));
-#endif
-#ifdef SRS_AUTO_STAT
     features->set("stat", SrsJsonAny::boolean(true));
-#else
-    features->set("stat", SrsJsonAny::boolean(false));
-#endif
-#ifdef SRS_AUTO_NGINX
-    features->set("nginx", SrsJsonAny::boolean(true));
-#else
-    features->set("nginx", SrsJsonAny::boolean(false));
-#endif
-#ifdef SRS_AUTO_FFMPEG_TOOL
-    features->set("ffmpeg", SrsJsonAny::boolean(true));
-#else
-    features->set("ffmpeg", SrsJsonAny::boolean(false));
-#endif
-#ifdef SRS_AUTO_STREAM_CASTER
     features->set("caster", SrsJsonAny::boolean(true));
-#else
-    features->set("caster", SrsJsonAny::boolean(false));
-#endif
 #ifdef SRS_PERF_COMPLEX_SEND
     features->set("complex_send", SrsJsonAny::boolean(true));
 #else
@@ -687,12 +654,7 @@ srs_error_t SrsGoApiRequests::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
     // request headers
     SrsJsonObject* headers = SrsJsonAny::object();
     data->set("headers", headers);
-    
-    for (int i = 0; i < r->request_header_count(); i++) {
-        std::string key = r->request_header_key_at(i);
-        std::string value = r->request_header_value_at(i);
-        headers->set(key, SrsJsonAny::str(value.c_str()));
-    }
+    r->header()->dumps(headers);
     
     // server informations
     SrsJsonObject* server = SrsJsonAny::object();
@@ -701,7 +663,7 @@ srs_error_t SrsGoApiRequests::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
     server->set("sigature", SrsJsonAny::str(RTMP_SIG_SRS_KEY));
     server->set("version", SrsJsonAny::str(RTMP_SIG_SRS_VERSION));
     server->set("link", SrsJsonAny::str(RTMP_SIG_SRS_URL));
-    server->set("time", SrsJsonAny::integer(srs_get_system_time_ms()));
+    server->set("time", SrsJsonAny::integer(srsu2ms(srs_get_system_time())));
     
     return srs_api_response(w, r, obj->dumps());
 }
@@ -1313,6 +1275,7 @@ srs_error_t SrsGoApiClusters::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
     string vhost = r->query_get("vhost");
     string app = r->query_get("app");
     string stream = r->query_get("stream");
+    string coworker = r->query_get("coworker");
     data->set("query", SrsJsonAny::object()
               ->set("ip", SrsJsonAny::str(ip.c_str()))
               ->set("vhost", SrsJsonAny::str(vhost.c_str()))
@@ -1320,7 +1283,7 @@ srs_error_t SrsGoApiClusters::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
               ->set("stream", SrsJsonAny::str(stream.c_str())));
     
     SrsCoWorkers* coworkers = SrsCoWorkers::instance();
-    data->set("origin", coworkers->dumps(vhost, app, stream));
+    data->set("origin", coworkers->dumps(vhost, coworker, app, stream));
     
     return srs_api_response(w, r, obj->dumps());
 }
@@ -1356,24 +1319,7 @@ SrsHttpApi::~SrsHttpApi()
     _srs_config->unsubscribe(this);
 }
 
-void SrsHttpApi::resample()
-{
-    // TODO: FIXME: implements it
-}
-
-int64_t SrsHttpApi::get_send_bytes_delta()
-{
-    // TODO: FIXME: implements it
-    return 0;
-}
-
-int64_t SrsHttpApi::get_recv_bytes_delta()
-{
-    // TODO: FIXME: implements it
-    return 0;
-}
-
-void SrsHttpApi::cleanup()
+void SrsHttpApi::remark(int64_t* in, int64_t* out)
 {
     // TODO: FIXME: implements it
 }
@@ -1382,7 +1328,7 @@ srs_error_t SrsHttpApi::do_cycle()
 {
     srs_error_t err = srs_success;
     
-    srs_trace("api get peer ip success. ip=%s", ip.c_str());
+    srs_trace("API server client, ip=%s", ip.c_str());
     
     // initialize parser
     if ((err = parser->initialize(HTTP_REQUEST, true)) != srs_success) {
@@ -1391,7 +1337,7 @@ srs_error_t SrsHttpApi::do_cycle()
     
     // set the recv timeout, for some clients never disconnect the connection.
     // @see https://github.com/ossrs/srs/issues/398
-    skt->set_recv_timeout(SRS_HTTP_RECV_TMMS);
+    skt->set_recv_timeout(SRS_HTTP_RECV_TIMEOUT);
     
     // initialize the cors, which will proxy to mux.
     bool crossdomain_enabled = _srs_config->get_http_api_crossdomain();

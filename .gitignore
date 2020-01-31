@@ -16,6 +16,8 @@
 *.pyc
 *.swp
 .DS_Store
+.vscode
+.vscode/*
 /trunk/Makefile
 /trunk/objs
 /trunk/src/build-qt-Desktop-Debug
@@ -29,3 +31,7 @@
 
 # Apple-specific garbage files.
 .AppleDouble
+
+.idea
+.DS_Store
+

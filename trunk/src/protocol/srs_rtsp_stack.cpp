@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -38,8 +38,6 @@ using namespace std;
 #include <srs_kernel_utility.hpp>
 #include <srs_kernel_buffer.hpp>
 #include <srs_kernel_codec.hpp>
-
-#ifdef SRS_AUTO_STREAM_CASTER
 
 #define SRS_RTSP_BUFFER 4096
 
@@ -161,7 +159,7 @@ void SrsRtpPacket::copy(SrsRtpPacket* src)
     
     chunked = src->chunked;
     completed = src->completed;
-    
+
     srs_freep(audio);
     audio = new SrsAudioFrame();
 }
@@ -234,10 +232,7 @@ srs_error_t SrsRtpPacket::decode_97(SrsBuffer* stream)
     int required_size = 0;
     
     // append left bytes to payload.
-    payload->append(
-                    stream->data() + stream->pos() + au_size,
-                    stream->size() - stream->pos() - au_size
-                    );
+    payload->append(stream->data() + stream->pos() + au_size, stream->size() - stream->pos() - au_size);
     char* p = payload->bytes();
     
     for (int i = 0; i < au_size; i += 2) {
@@ -813,7 +808,7 @@ srs_error_t SrsRtspSetupResponse::encode_header(stringstream& ss)
     return srs_success;
 }
 
-SrsRtspStack::SrsRtspStack(ISrsProtocolReaderWriter* s)
+SrsRtspStack::SrsRtspStack(ISrsProtocolReadWriter* s)
 {
     buf = new SrsSimpleStream();
     skt = s;
@@ -892,7 +887,7 @@ srs_error_t SrsRtspStack::do_recv_message(SrsRtspRequest* req)
             if ((err = recv_token_eof(seq)) != srs_success) {
                 return srs_error_wrap(err, "seq");
             }
-            req->seq = ::atol(seq.c_str());
+            req->seq = ::atoll(seq.c_str());
         } else if (token == SRS_RTSP_TOKEN_CONTENT_TYPE) {
             std::string ct;
             if ((err = recv_token_eof(ct)) != srs_success) {
@@ -904,7 +899,7 @@ srs_error_t SrsRtspStack::do_recv_message(SrsRtspRequest* req)
             if ((err = recv_token_eof(cl)) != srs_success) {
                 return srs_error_wrap(err, "cl");
             }
-            req->content_length = ::atol(cl.c_str());
+            req->content_length = ::atoll(cl.c_str());
         } else if (token == SRS_RTSP_TOKEN_TRANSPORT) {
             std::string transport;
             if ((err = recv_token_eof(transport)) != srs_success) {
@@ -1101,8 +1096,6 @@ srs_error_t SrsRtspStack::recv_token(std::string& token, SrsRtspTokenState& stat
     
     return err;
 }
-
-#endif
 
 #endif
 

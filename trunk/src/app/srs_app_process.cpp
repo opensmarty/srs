@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -324,6 +324,31 @@ void SrsProcess::fast_stop()
         return;
     }
     
+    return;
+}
+
+void SrsProcess::fast_kill()
+{
+    int ret = ERROR_SUCCESS;
+
+    if (!is_started) {
+        return;
+    }
+
+    if (pid <= 0) {
+        return;
+    }
+
+    if (kill(pid, SIGKILL) < 0) {
+        ret = ERROR_SYSTEM_KILL;
+        srs_warn("ignore fast kill process failed, pid=%d. ret=%d", pid, ret);
+        return;
+    }
+
+    // Try to wait pid to avoid zombie FFMEPG.
+    int status = 0;
+    waitpid(pid, &status, WNOHANG);
+
     return;
 }
 

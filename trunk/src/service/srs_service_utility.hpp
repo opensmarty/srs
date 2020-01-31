@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -32,19 +32,36 @@
 
 #include <srs_service_st.hpp>
 
-// whether the url is starts with http:// or https://
+class ISrsHttpMessage;
+
+// Whether the url is starts with http:// or https://
 extern bool srs_string_is_http(std::string url);
 extern bool srs_string_is_rtmp(std::string url);
 
-// get local ip, fill to @param ips
+// Whether string is digit number
+//      is_digit("0")  === true
+//      is_digit("0000000000")  === true
+//      is_digit("1234567890")  === true
+//      is_digit("0123456789")  === true
+//      is_digit("1234567890a") === false
+//      is_digit("a1234567890") === false
+//      is_digit("10e3") === false
+//      is_digit("!1234567890") === false
+//      is_digit("") === false
+extern bool srs_is_digit_number(std::string str);
+
+// Get local ip, fill to @param ips
 extern std::vector<std::string>& srs_get_local_ips();
 
-// get local public ip, empty string if no public internet address found.
+// Get local public ip, empty string if no public internet address found.
 extern std::string srs_get_public_internet_address();
 
-// detect whether specified device is internet public address.
+// Detect whether specified device is internet public address.
 extern bool srs_net_device_is_internet(std::string ifname);
 extern bool srs_net_device_is_internet(const sockaddr* addr);
+
+// Get the original ip from query and header by proxy.
+extern std::string srs_get_original_ip(ISrsHttpMessage* r);
 
 #endif
 

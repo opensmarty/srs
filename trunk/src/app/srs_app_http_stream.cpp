@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -23,7 +23,7 @@
 
 #include <srs_app_http_stream.hpp>
 
-#define SRS_STREAM_CACHE_CYCLE_SECONDS 30
+#define SRS_STREAM_CACHE_CYCLE (30 * SRS_UTIME_SECONDS)
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -108,7 +108,8 @@ srs_error_t SrsBufferCache::dump_cache(SrsConsumer* consumer, SrsRtmpJitterAlgor
         return srs_error_wrap(err, "dump packets");
     }
     
-    srs_trace("http: dump cache %d msgs, duration=%dms, cache=%.2fs", queue->size(), queue->duration(), fast_cache);
+    srs_trace("http: dump cache %d msgs, duration=%dms, cache=%dms",
+        queue->size(), srsu2msi(queue->duration()), srsu2msi(fast_cache));
     
     return err;
 }
@@ -119,7 +120,7 @@ srs_error_t SrsBufferCache::cycle()
     
     // TODO: FIXME: support reload.
     if (fast_cache <= 0) {
-        srs_usleep(SRS_STREAM_CACHE_CYCLE_SECONDS * 1000 * 1000);
+        srs_usleep(SRS_STREAM_CACHE_CYCLE);
         return err;
     }
     
@@ -155,9 +156,9 @@ srs_error_t SrsBufferCache::cycle()
         }
         
         if (count <= 0) {
-            srs_info("http: sleep %dms for no msg", SRS_CONSTS_RTMP_PULSE_TMMS);
+            srs_info("http: sleep %dms for no msg", srsu2msi(SRS_CONSTS_RTMP_PULSE));
             // directly use sleep, donot use consumer wait.
-            srs_usleep(SRS_CONSTS_RTMP_PULSE_TMMS * 1000);
+            srs_usleep(SRS_CONSTS_RTMP_PULSE);
             
             // ignore when nothing got.
             continue;
@@ -165,7 +166,7 @@ srs_error_t SrsBufferCache::cycle()
         
         if (pprint->can_print()) {
             srs_trace("-> " SRS_CONSTS_LOG_HTTP_STREAM_CACHE " http: got %d msgs, age=%d, min=%d, mw=%d",
-                      count, pprint->age(), SRS_PERF_MW_MIN_MSGS, SRS_CONSTS_RTMP_PULSE_TMMS);
+                      count, pprint->age(), SRS_PERF_MW_MIN_MSGS, srsu2msi(SRS_CONSTS_RTMP_PULSE));
         }
         
         // free the messages.
@@ -489,13 +490,13 @@ srs_error_t SrsLiveStream::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage
 {
     srs_error_t err = srs_success;
     
-    if ((err = http_hooks_on_play()) != srs_success) {
+    if ((err = http_hooks_on_play(r)) != srs_success) {
         return srs_error_wrap(err, "http hook");
     }
     
     err = do_serve_http(w, r);
     
-    http_hooks_on_stop();
+    http_hooks_on_stop(r);
     
     return err;
 }
@@ -539,6 +540,9 @@ srs_error_t SrsLiveStream::do_serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
         return srs_error_new(ERROR_HTTP_LIVE_STREAM_EXT, "invalid pattern=%s", entry->pattern.c_str());
     }
     SrsAutoFree(ISrsBufferEncoder, enc);
+
+    // Enter chunked mode, because we didn't set the content-length.
+    w->write_header(SRS_CONSTS_HTTP_OK);
     
     // create consumer of souce, ignore gop cache, use the audio gop cache.
     SrsConsumer* consumer = NULL;
@@ -589,11 +593,11 @@ srs_error_t SrsLiveStream::do_serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
         }
     }
     
-    int mw_sleep = _srs_config->get_mw_sleep_ms(req->vhost);
+    srs_utime_t mw_sleep = _srs_config->get_mw_sleep(req->vhost);
     if ((err = hc->set_socket_buffer(mw_sleep)) != srs_success) {
-        return srs_error_wrap(err, "set mw_sleep");
+        return srs_error_wrap(err, "set mw_sleep %" PRId64, mw_sleep);
     }
-    
+
     SrsHttpRecvThread* trd = new SrsHttpRecvThread(hc);
     SrsAutoFree(SrsHttpRecvThread, trd);
     
@@ -602,9 +606,11 @@ srs_error_t SrsLiveStream::do_serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
     }
     
     srs_trace("FLV %s, encoder=%s, nodelay=%d, mw_sleep=%dms, cache=%d, msgs=%d",
-        entry->pattern.c_str(), enc_desc.c_str(), tcp_nodelay, mw_sleep, enc->has_cache(), msgs.max);
+        entry->pattern.c_str(), enc_desc.c_str(), tcp_nodelay, srsu2msi(mw_sleep),
+        enc->has_cache(), msgs.max);
 
     // TODO: free and erase the disabled entry after all related connections is closed.
+    // TODO: FXIME: Support timeout for player, quit infinite-loop.
     while (entry->enabled) {
         pprint->elapse();
         
@@ -622,14 +628,14 @@ srs_error_t SrsLiveStream::do_serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
         
         if (count <= 0) {
             // Directly use sleep, donot use consumer wait, because we couldn't awake consumer.
-            srs_usleep(mw_sleep * 1000);
+            srs_usleep(mw_sleep);
             // ignore when nothing got.
             continue;
         }
         
         if (pprint->can_print()) {
             srs_trace("-> " SRS_CONSTS_LOG_HTTP_STREAM " http: got %d msgs, age=%d, min=%d, mw=%d",
-                count, pprint->age(), SRS_PERF_MW_MIN_MSGS, mw_sleep);
+                count, pprint->age(), SRS_PERF_MW_MIN_MSGS, srsu2msi(mw_sleep));
         }
         
         // sendout all messages.
@@ -654,17 +660,24 @@ srs_error_t SrsLiveStream::do_serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
             return srs_error_wrap(err, "send messages");
         }
     }
-    
-    return err;
+
+    // Here, the entry is disabled by encoder un-publishing or reloading,
+    // so we must return a io.EOF error to disconnect the client, or the client will never quit.
+    return srs_error_new(ERROR_HTTP_STREAM_EOF, "Stream EOF");
 }
 
-srs_error_t SrsLiveStream::http_hooks_on_play()
+srs_error_t SrsLiveStream::http_hooks_on_play(ISrsHttpMessage* r)
 {
     srs_error_t err = srs_success;
     
     if (!_srs_config->get_vhost_http_hooks_enabled(req->vhost)) {
         return err;
     }
+
+    // Create request to report for the specified connection.
+    SrsHttpMessage* hr = dynamic_cast<SrsHttpMessage*>(r);
+    SrsRequest* nreq = hr->to_request(req->vhost);
+    SrsAutoFree(SrsRequest, nreq);
     
     // the http hooks will cause context switch,
     // so we must copy all hooks for the on_connect may freed.
@@ -672,7 +685,7 @@ srs_error_t SrsLiveStream::http_hooks_on_play()
     vector<string> hooks;
     
     if (true) {
-        SrsConfDirective* conf = _srs_config->get_vhost_on_play(req->vhost);
+        SrsConfDirective* conf = _srs_config->get_vhost_on_play(nreq->vhost);
         
         if (!conf) {
             return err;
@@ -683,19 +696,24 @@ srs_error_t SrsLiveStream::http_hooks_on_play()
     
     for (int i = 0; i < (int)hooks.size(); i++) {
         std::string url = hooks.at(i);
-        if ((err = SrsHttpHooks::on_play(url, req)) != srs_success) {
-            return srs_error_wrap(err, "rtmp on_play %s", url.c_str());
+        if ((err = SrsHttpHooks::on_play(url, nreq)) != srs_success) {
+            return srs_error_wrap(err, "http on_play %s", url.c_str());
         }
     }
     
     return err;
 }
 
-void SrsLiveStream::http_hooks_on_stop()
+void SrsLiveStream::http_hooks_on_stop(ISrsHttpMessage* r)
 {
     if (!_srs_config->get_vhost_http_hooks_enabled(req->vhost)) {
         return;
     }
+
+    // Create request to report for the specified connection.
+    SrsHttpMessage* hr = dynamic_cast<SrsHttpMessage*>(r);
+    SrsRequest* nreq = hr->to_request(req->vhost);
+    SrsAutoFree(SrsRequest, nreq);
     
     // the http hooks will cause context switch,
     // so we must copy all hooks for the on_connect may freed.
@@ -703,7 +721,7 @@ void SrsLiveStream::http_hooks_on_stop()
     vector<string> hooks;
     
     if (true) {
-        SrsConfDirective* conf = _srs_config->get_vhost_on_stop(req->vhost);
+        SrsConfDirective* conf = _srs_config->get_vhost_on_stop(nreq->vhost);
         
         if (!conf) {
             srs_info("ignore the empty http callback: on_stop");
@@ -715,7 +733,7 @@ void SrsLiveStream::http_hooks_on_stop()
     
     for (int i = 0; i < (int)hooks.size(); i++) {
         std::string url = hooks.at(i);
-        SrsHttpHooks::on_stop(url, req);
+        SrsHttpHooks::on_stop(url, nreq);
     }
     
     return;
@@ -1005,7 +1023,7 @@ srs_error_t SrsHttpStreamServer::hijack(ISrsHttpMessage* request, ISrsHttpHandle
         if (it == tflvs.end()) {
             return err;
         }
-        
+
         // hstrs always enabled.
         // for origin, the http stream will be mount already when publish,
         //      so it must never enter this line for stream already mounted.
@@ -1034,7 +1052,19 @@ srs_error_t SrsHttpStreamServer::hijack(ISrsHttpMessage* request, ISrsHttpHandle
             return err;
         }
     }
-    
+
+    // For HTTP-FLV stream, the template must have the same schema with upath.
+    // The template is defined in config, the mout of http stream. The upath is specified by http request path.
+    // If template is "[vhost]/[app]/[stream].flv", the upath should be:
+    //      matched for "/live/livestream.flv"
+    //      matched for "ossrs.net/live/livestream.flv"
+    //      not-matched for "/livestream.flv", which is actually "/__defaultApp__/livestream.flv", HTTP not support default app.
+    //      not-matched for "/live/show/livestream.flv"
+    string upath = request->path();
+    if (srs_string_count(upath, "/") != srs_string_count(entry->mount, "/")) {
+        return err;
+    }
+
     // convert to concreate class.
     SrsHttpMessage* hreq = dynamic_cast<SrsHttpMessage*>(request);
     srs_assert(hreq);
@@ -1059,7 +1089,7 @@ srs_error_t SrsHttpStreamServer::hijack(ISrsHttpMessage* request, ISrsHttpHandle
     }
     
     SrsSource* s = NULL;
-    if ((err = SrsSource::fetch_or_create(r, server, &s)) != srs_success) {
+    if ((err = _srs_sources->fetch_or_create(r, server, &s)) != srs_success) {
         return srs_error_wrap(err, "source create");
     }
     srs_assert(s != NULL);
@@ -1097,7 +1127,7 @@ srs_error_t SrsHttpStreamServer::initialize_flv_streaming()
         if (!conf->is_vhost()) {
             continue;
         }
-        
+
         if ((err = initialize_flv_entry(conf->arg0())) != srs_success) {
             return srs_error_wrap(err, "init flv entries");
         }
@@ -1109,7 +1139,7 @@ srs_error_t SrsHttpStreamServer::initialize_flv_streaming()
 srs_error_t SrsHttpStreamServer::initialize_flv_entry(std::string vhost)
 {
     srs_error_t err = srs_success;
-    
+
     if (!_srs_config->get_vhost_http_remux_enabled(vhost)) {
         return err;
     }

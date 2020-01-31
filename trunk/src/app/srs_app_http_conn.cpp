@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -72,24 +72,7 @@ SrsHttpConn::~SrsHttpConn()
     srs_freep(cors);
 }
 
-void SrsHttpConn::resample()
-{
-    // TODO: FIXME: implements it
-}
-
-int64_t SrsHttpConn::get_send_bytes_delta()
-{
-    // TODO: FIXME: implements it
-    return 0;
-}
-
-int64_t SrsHttpConn::get_recv_bytes_delta()
-{
-    // TODO: FIXME: implements it
-    return 0;
-}
-
-void SrsHttpConn::cleanup()
+void SrsHttpConn::remark(int64_t* in, int64_t* out)
 {
     // TODO: FIXME: implements it
 }
@@ -98,16 +81,14 @@ srs_error_t SrsHttpConn::do_cycle()
 {
     srs_error_t err = srs_success;
     
-    srs_trace("HTTP client ip=%s", ip.c_str());
-    
     // initialize parser
     if ((err = parser->initialize(HTTP_REQUEST, false)) != srs_success) {
-        return srs_error_wrap(err, "init parser");
+        return srs_error_wrap(err, "init parser for %s", ip.c_str());
     }
     
     // set the recv timeout, for some clients never disconnect the connection.
     // @see https://github.com/ossrs/srs/issues/398
-    skt->set_recv_timeout(SRS_HTTP_RECV_TMMS);
+    skt->set_recv_timeout(SRS_HTTP_RECV_TIMEOUT);
     
     SrsRequest* last_req = NULL;
     SrsAutoFree(SrsRequest, last_req);
@@ -119,10 +100,12 @@ srs_error_t SrsHttpConn::do_cycle()
     }
     
     // process http messages.
-    while ((err = trd->pull()) == srs_success) {
-        ISrsHttpMessage* req = NULL;
-        
+    for (int req_id = 0; (err = trd->pull()) == srs_success; req_id++) {
+        // Try to receive a message from http.
+        srs_trace("HTTP client ip=%s, request=%d, to=%dms", ip.c_str(), req_id, srsu2ms(SRS_HTTP_RECV_TIMEOUT));
+
         // get a http message
+        ISrsHttpMessage* req = NULL;
         if ((err = parser->parse_message(skt, &req)) != srs_success) {
             break;
         }

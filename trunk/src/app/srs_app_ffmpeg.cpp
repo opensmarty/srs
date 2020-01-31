@@ -1,7 +1,7 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2013-2018 Winlin
+ * Copyright (c) 2013-2020 Winlin
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -416,6 +416,11 @@ void SrsFFMPEG::stop()
 void SrsFFMPEG::fast_stop()
 {
     process->fast_stop();
+}
+
+void SrsFFMPEG::fast_kill()
+{
+    process->fast_kill();
 }
 
 #endif
